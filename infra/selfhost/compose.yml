@@ -45,8 +45,10 @@ x-standalone-public-urls: &standalone-public-urls
 x-backend-image: &backend-image
   build:
     context: ../../apps/backend
-    # runtime-env.sh is baked into the image (never bind-mounted), so it is readable by the non-root
-    # user whatever umask the checkout was made under.
+    # The standalone stage bakes runtime-env.sh into the image (never bind-mounted), so it is
+    # readable by the non-root user whatever umask the checkout was made under. The Dockerfile's
+    # default stage stays the plain runtime image, which needs no `selfhost` context.
+    target: standalone
     additional_contexts:
       selfhost: .
   image: nibomo-selfhost-backend:${NIBOMO_IMAGE_TAG:?set NIBOMO_IMAGE_TAG in .env}
@@ -153,7 +155,8 @@ services:
   auth:
     build:
       context: ../../apps/auth
-      # runtime-env.sh is baked in, as for the backend image.
+      # runtime-env.sh is baked in by the standalone stage, as for the backend image.
+      target: standalone
       additional_contexts:
         selfhost: .
     image: nibomo-selfhost-auth:${NIBOMO_IMAGE_TAG:?set NIBOMO_IMAGE_TAG in .env}

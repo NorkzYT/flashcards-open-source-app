@@ -125,8 +125,8 @@ disabled; without an AI overlay the backend has no outbound network at all.
 | `migrate` | built (`Dockerfile.migrate`) | internal | one-shot; gates `auth` and `backend` |
 | `objectstore` | `rustfs/rustfs:1.0.6@sha256:ee717072…05044a` | storage | volume `objectdata`; no published port, console off |
 | `objectstore-init` | built (`Dockerfile.objectstore-init`: the same pinned RustFS image + init script) | storage | one-shot; gates `backend` and `worker` |
-| `auth` | built (`apps/auth/Dockerfile`) | internal + app + egress | egress only for SMTP |
-| `backend` | built (`apps/backend/Dockerfile`) | internal + app + storage (+ egress with AI) | healthy only when `/v1/health` reaches Postgres |
+| `auth` | built (`apps/auth/Dockerfile`, `standalone` stage) | internal + app + egress | egress only for SMTP |
+| `backend` | built (`apps/backend/Dockerfile`, `standalone` stage) | internal + app + storage (+ egress with AI) | healthy only when `/v1/health` reaches Postgres |
 | `mcp` | backend image (`entrypoints/mcp-node.js`) | internal + app | healthy on `/health`; no outbound route |
 | `worker` | backend image, profile `ai` | internal + storage + egress | only with an AI overlay |
 | `media-maintenance` | backend image (`entrypoints/media-maintenance-node.js`) | internal + storage | always; healthy while cycles succeed; no outbound route |
