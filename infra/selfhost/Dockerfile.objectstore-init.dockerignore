@@ -1,0 +1,3 @@
+# infra/selfhost build context, limited to the init script.
+*
+!objectstore-init.sh

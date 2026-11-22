@@ -7,7 +7,10 @@
 # project nibomo. Its successful answers are labeled simulations, never real generations.
 services:
   ai-test-provider:
-    image: node:24.22.3-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.ai-test-provider
+    image: nibomo-selfhost-ai-test-provider:${NIBOMO_IMAGE_TAG:?}
     command: ["node", "/selfhost/ai-test-provider.mjs"]
     user: node
     read_only: true
@@ -15,8 +18,6 @@ services:
       AI_TEST_PROJECT: ${NIBOMO_COMPOSE_PROJECT:?}
       AI_TEST_FUNDING: ${AI_TEST_FUNDING:?set by ai-acceptance.sh}
       AI_TEST_OPERATOR_KEY_SHA256: ${AI_TEST_OPERATOR_KEY_SHA256:?set by ai-acceptance.sh}
-    volumes:
-      - ./ai-test-provider.mjs:/selfhost/ai-test-provider.mjs:ro
     labels:
       com.nibomo.test: synthetic-ai-provider
     networks: [ai-test]

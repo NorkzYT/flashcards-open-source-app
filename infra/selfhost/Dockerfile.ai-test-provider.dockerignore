@@ -1,0 +1,3 @@
+# infra/selfhost build context, limited to the synthetic provider.
+*
+!ai-test-provider.mjs

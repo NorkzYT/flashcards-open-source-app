@@ -45,11 +45,18 @@ x-standalone-public-urls: &standalone-public-urls
 x-backend-image: &backend-image
   build:
     context: ../../apps/backend
+    # runtime-env.sh is baked into the image (never bind-mounted), so it is readable by the non-root
+    # user whatever umask the checkout was made under.
+    additional_contexts:
+      selfhost: .
   image: nibomo-selfhost-backend:${NIBOMO_IMAGE_TAG:?set NIBOMO_IMAGE_TAG in .env}
 
+# RustFS 1.0.6, pinned by digest (docs/self-hosting.md lists the verification). The one pin for both
+# the object store and the objectstore-init image built on it.
+x-rustfs-ref: &rustfs-ref rustfs/rustfs:1.0.6@sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a
+
 x-rustfs-image: &rustfs-image
-  # RustFS 1.0.6, pinned by digest (docs/self-hosting.md lists the verification).
-  image: rustfs/rustfs:1.0.6@sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a
+  image: *rustfs-ref
 
 services:
   postgres:
@@ -99,11 +106,16 @@ services:
   # One-shot, idempotent: private bucket, expiry rules, and a bucket-scoped application user. The
   # only holder of the root credential besides the server.
   objectstore-init:
-    <<: *rustfs-image
+    # The pinned RustFS image with objectstore-init.sh baked in (Dockerfile.objectstore-init).
+    build:
+      context: .
+      dockerfile: Dockerfile.objectstore-init
+      args:
+        RUSTFS_IMAGE: *rustfs-ref
+    image: nibomo-selfhost-objectstore-init:${NIBOMO_IMAGE_TAG:?set NIBOMO_IMAGE_TAG in .env}
     depends_on:
       objectstore:
         condition: service_healthy
-    entrypoint: ["/bin/sh", "/selfhost/objectstore-init.sh"]
     environment:
       OBJECTSTORE_ENDPOINT: http://objectstore:9000
       MEDIA_BUCKET: ${NIBOMO_MEDIA_BUCKET:?}
@@ -112,8 +124,6 @@ services:
       - objectstore_root_secret_key
       - objectstore_media_access_key
       - objectstore_media_secret_key
-    volumes:
-      - ./objectstore-init.sh:/selfhost/objectstore-init.sh:ro
     tmpfs:
       - /tmp:size=8m,mode=1777
     networks: [storage]
@@ -143,6 +153,9 @@ services:
   auth:
     build:
       context: ../../apps/auth
+      # runtime-env.sh is baked in, as for the backend image.
+      additional_contexts:
+        selfhost: .
     image: nibomo-selfhost-auth:${NIBOMO_IMAGE_TAG:?set NIBOMO_IMAGE_TAG in .env}
     depends_on:
       migrate:
@@ -186,8 +199,6 @@ services:
       - oidc_signing_key
       - source: smtp_password
         target: smtp_password
-    volumes:
-      - ./runtime-env.sh:/selfhost/runtime-env.sh:ro
     # egress: outbound SMTP for sign-in codes.
     networks: [internal, app, egress]
     restart: unless-stopped
@@ -231,8 +242,6 @@ services:
       - backend_csrf_secret
       - objectstore_media_access_key
       - objectstore_media_secret_key
-    volumes:
-      - ./runtime-env.sh:/selfhost/runtime-env.sh:ro
     # No outbound route; compose.ai.yml adds egress for the AI provider.
     networks: [internal, app, storage]
     restart: unless-stopped
@@ -267,8 +276,6 @@ services:
       MCP_ALLOWED_ORIGINS: ${NIBOMO_MCP_ALLOWED_ORIGINS:-}
     secrets:
       - db_backend_password
-    volumes:
-      - ./runtime-env.sh:/selfhost/runtime-env.sh:ro
     networks: [internal, app]
     restart: unless-stopped
     healthcheck:
@@ -300,8 +307,6 @@ services:
       - db_backend_password
       - objectstore_media_access_key
       - objectstore_media_secret_key
-    volumes:
-      - ./runtime-env.sh:/selfhost/runtime-env.sh:ro
     networks: [internal, storage]
     restart: unless-stopped
     # SIGTERM stops leasing and drains in-flight runs within CHAT_WORKER_SHUTDOWN_GRACE_MS (30 s).
@@ -338,8 +343,6 @@ services:
       - db_backend_password
       - objectstore_media_access_key
       - objectstore_media_secret_key
-    volumes:
-      - ./runtime-env.sh:/selfhost/runtime-env.sh:ro
     networks: [internal, storage]
     restart: unless-stopped
     # SIGTERM aborts the cycle and exits within MEDIA_MAINTENANCE_SHUTDOWN_GRACE_MS (20 s).

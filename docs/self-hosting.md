@@ -124,13 +124,17 @@ disabled; without an AI overlay the backend has no outbound network at all.
 | `postgres` | `postgres:18.7` | internal | volume `pgdata`; no published port |
 | `migrate` | built (`Dockerfile.migrate`) | internal | one-shot; gates `auth` and `backend` |
 | `objectstore` | `rustfs/rustfs:1.0.6@sha256:ee717072…05044a` | storage | volume `objectdata`; no published port, console off |
-| `objectstore-init` | same | storage | one-shot; gates `backend` and `worker` |
+| `objectstore-init` | built (`Dockerfile.objectstore-init`: the same pinned RustFS image + init script) | storage | one-shot; gates `backend` and `worker` |
 | `auth` | built (`apps/auth/Dockerfile`) | internal + app + egress | egress only for SMTP |
 | `backend` | built (`apps/backend/Dockerfile`) | internal + app + storage (+ egress with AI) | healthy only when `/v1/health` reaches Postgres |
 | `mcp` | backend image (`entrypoints/mcp-node.js`) | internal + app | healthy on `/health`; no outbound route |
 | `worker` | backend image, profile `ai` | internal + storage + egress | only with an AI overlay |
 | `media-maintenance` | backend image (`entrypoints/media-maintenance-node.js`) | internal + storage | always; healthy while cycles succeed; no outbound route |
 | `gateway` | built (`Dockerfile.gateway`, Caddy 2.10.2) | app + edge + storage | the only published port, loopback by default; cannot reach Postgres |
+
+No service bind-mounts a file from the source checkout: the migration SQL and driver, the init script
+and `runtime-env.sh` are baked into their images with fixed root-owned, read-only modes, so a checkout
+made under a strict umask (for example `077`) installs the same way as one made under `022`.
 
 Credentials are files in `<instance>/secrets/` (directory `0700`, files `0444` so container users
 can read their mounted copy; keep that directory's mode in every copy and backup) mounted as

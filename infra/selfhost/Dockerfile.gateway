@@ -12,10 +12,12 @@ WORKDIR /src/apps/web
 COPY apps/web/package.json apps/web/package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY apps/web/ ./
-RUN npm run build
+# Vite copies public/ files with the checkout's modes (0600 under a strict umask), which the non-root
+# Caddy user could not serve; give the output fixed world-readable modes.
+RUN npm run build && chmod -R u=rwX,go=rX dist
 
 FROM caddy:2.10.2-alpine
-COPY infra/selfhost/Caddyfile /etc/caddy/Caddyfile
+COPY --chmod=0444 infra/selfhost/Caddyfile /etc/caddy/Caddyfile
 COPY --from=web /src/apps/web/dist /srv/web
 RUN mkdir -p /data /config && chown -R 1001:1001 /data /config
 USER 1001:1001

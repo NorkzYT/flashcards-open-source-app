@@ -1,0 +1,7 @@
+# One-shot RustFS initialisation job: the pinned RustFS image (passed by compose.yml, the single pin)
+# plus objectstore-init.sh. The script is baked in with a fixed mode instead of bind-mounted, so the
+# non-root rustfs user can run it even when the checkout was made under a strict umask (077).
+ARG RUSTFS_IMAGE
+FROM ${RUSTFS_IMAGE}
+COPY --chmod=0555 objectstore-init.sh /selfhost/objectstore-init.sh
+ENTRYPOINT ["/bin/sh", "/selfhost/objectstore-init.sh"]

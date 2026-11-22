@@ -1,8 +1,18 @@
 # Standalone migration image: the repository's migration driver and SQL only.
+#
+# COPY keeps the checkout's file modes, and a clone or archive made under a strict umask (077) has
+# 0600 files in 0700 directories that USER postgres could not read. The files stage gives them fixed
+# modes (root-owned, world-readable, never writable by the runtime user) whatever the host umask was.
+FROM postgres:18.7-alpine AS files
+COPY scripts/deploy/migrate.sh /out/scripts/deploy/migrate.sh
+COPY db/ /out/db/
+COPY infra/selfhost/migrate-entrypoint.sh /out/entrypoint.sh
+RUN chmod -R u=rwX,go=rX /out \
+  && chmod 0555 /out/entrypoint.sh /out/scripts/deploy/migrate.sh
+
 FROM postgres:18.7-alpine
-COPY scripts/deploy/migrate.sh /scripts/deploy/migrate.sh
-COPY db/ /db/
-COPY infra/selfhost/migrate-entrypoint.sh /entrypoint.sh
-RUN chmod 0555 /entrypoint.sh /scripts/deploy/migrate.sh
+COPY --from=files /out/scripts/ /scripts/
+COPY --from=files /out/db/ /db/
+COPY --from=files /out/entrypoint.sh /entrypoint.sh
 USER postgres
 ENTRYPOINT ["/entrypoint.sh"]
