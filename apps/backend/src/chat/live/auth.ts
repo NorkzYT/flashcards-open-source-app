@@ -3,6 +3,7 @@ import { HttpError } from "../../shared/errors";
 import type { BackendTraceCarrier } from "../../observability/sentry";
 import { assertAccountLiveSession } from "../../auth/principalSessions";
 import { getBackendChatLiveAuthSecret } from "../../aws/secrets";
+import { readStandaloneChatLiveSecretFile } from "./secretFile";
 
 const CHAT_LIVE_AUTH_TOKEN_VERSION = 1;
 const CHAT_LIVE_AUTH_TTL_MS = 10 * 60 * 1000;
@@ -48,6 +49,23 @@ export function getBackendChatLiveAuthSecretArn(): string {
   }
 
   return secretArn;
+}
+
+/**
+ * The HMAC secret for live tokens: AWS Secrets Manager on the hosted stack, the mounted file in
+ * standalone mode (docs/self-hosting.md). Exactly one source may be configured.
+ */
+export async function getChatLiveAuthSecret(): Promise<string> {
+  const secretFile = process.env.CHAT_LIVE_AUTH_SECRET_FILE;
+  if (secretFile !== undefined && secretFile.trim() !== "") {
+    const secretArn = process.env.BACKEND_CHAT_LIVE_AUTH_SECRET_ARN;
+    if (secretArn !== undefined && secretArn.trim() !== "") {
+      throw new Error("CHAT_LIVE_AUTH_SECRET_FILE and BACKEND_CHAT_LIVE_AUTH_SECRET_ARN must not both be set");
+    }
+    return readStandaloneChatLiveSecretFile(secretFile);
+  }
+
+  return getBackendChatLiveAuthSecret(getBackendChatLiveAuthSecretArn());
 }
 
 function encodePayload(payload: ChatLiveAuthPayload): string {
@@ -140,7 +158,7 @@ export async function createChatLiveStreamEnvelope(
     traceContext,
   };
   await assertAccountLiveSession(userId, Math.floor((expiresAt - CHAT_LIVE_AUTH_TTL_MS) / 1_000));
-  const secret = await getBackendChatLiveAuthSecret(getBackendChatLiveAuthSecretArn());
+  const secret = await getChatLiveAuthSecret();
   const encodedPayload = encodePayload(payload);
   const signature = signPayload(encodedPayload, secret);
 
@@ -175,7 +193,7 @@ export async function verifyChatLiveAuthorizationHeader(
     throw new HttpError(401, "Chat live auth token is malformed", "CHAT_LIVE_AUTH_INVALID");
   }
 
-  const secret = await getBackendChatLiveAuthSecret(getBackendChatLiveAuthSecretArn());
+  const secret = await getChatLiveAuthSecret();
   const expectedSignature = signPayload(encodedPayload, secret);
   if (isMatchingSignature(expectedSignature, providedSignature) === false) {
     throw new HttpError(401, "Chat live auth token signature is invalid", "CHAT_LIVE_AUTH_INVALID");

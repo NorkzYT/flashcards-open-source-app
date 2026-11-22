@@ -1,6 +1,6 @@
 import type { BrowserGuestTrialContext } from "../../aiUsage/browserGuestTrial/policy";
 import { assertGuestChatInstructionsStillAuthorized } from "../customInstructions";
-import { claimChatRun, failQueuedChatRun, recordAiRunFailedAnalytics } from "../runs";
+import { claimChatRun, failQueuedChatRun, recordAiRunFailedAnalytics, type ChatRunClaimMode } from "../runs";
 import { runPersistedChatSession, type ChatWorkerRunResult } from "../runtime";
 import {
   classifyChatRunFailureCategory,
@@ -51,6 +51,8 @@ const CHAT_WORKER_DATABASE_CALL_CAP_MS = 30_000;
 type ChatWorkerExecutionContext = Readonly<{
   lambdaRequestId: string | null;
   getRemainingTimeInMillis: () => number;
+  /** Absent for Lambda, which keeps `queued_or_stale`; the standalone worker passes its exact dispatch lease. */
+  claimMode?: ChatRunClaimMode;
 }>;
 
 export async function handleChatWorkerEvent(
@@ -120,12 +122,12 @@ async function claimAndRunChatWorkerEvent(
   event: ChatWorkerEvent,
   executionContext: ChatWorkerExecutionContext,
 ): Promise<void> {
-  const userOpenAIApiKey = wrapWorkerPayloadUserOpenAIApiKey(event.userOpenAIApiKey);
+  const payloadUserOpenAIApiKey = wrapWorkerPayloadUserOpenAIApiKey(event.userOpenAIApiKey);
   const userId = await resolveTrustedChatWorkerOwner(
     event.userId, event.workspaceId, event.runId, event.sessionId ?? null, event.chatRequestId ?? null,
   );
   if (userId !== null) await convertLegacyAttachmentsBeforeClaim(event, userId, executionContext);
-  const claimedRun = await claimChatRun(event.userId, event.workspaceId, event.runId);
+  const claimedRun = await claimChatRun(event.userId, event.workspaceId, event.runId, executionContext.claimMode);
   if (claimedRun === null) {
     logChatWorkerLifecycleEvent("chat_worker_skip", {
       lambdaRequestId: executionContext.lambdaRequestId,
@@ -153,6 +155,9 @@ async function claimAndRunChatWorkerEvent(
     }, false);
     return;
   }
+
+  // Lambda carries the key in its invoke payload; standalone opens it from the sealed row inside the claim.
+  const userOpenAIApiKey = claimedRun.userOpenAIApiKey ?? payloadUserOpenAIApiKey;
 
   const logContext = {
     lambdaRequestId: executionContext.lambdaRequestId,

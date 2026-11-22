@@ -62,6 +62,7 @@ type CopyMediaAssetObjectInput = Readonly<{
   sha256: string;
   lastOperationId: string;
   observationScope: BackendObservationScope;
+  uploadSourceETag?: string;
 }>;
 
 type DirectMediaBlobStorageCapabilityVerifier = (
@@ -112,6 +113,9 @@ async function copyMediaAssetObjectIfAbsentWithDependencies(
               config.bucketName,
               input.uploadStorageKey,
             ),
+            ...(input.uploadSourceETag === undefined
+              ? {}
+              : { CopySourceIfMatch: input.uploadSourceETag }),
             ContentType: input.mimeType,
             ChecksumAlgorithm: "SHA256",
             IfNoneMatch: "*",
@@ -510,6 +514,9 @@ export async function promoteVerifiedMediaAssetUploadToBlobWithCapabilityVerifie
         sha256: input.sha256,
         lastOperationId: input.lastOperationId,
         observationScope: input.observationScope,
+        ...(input.uploadSourceETag === undefined
+          ? {}
+          : { uploadSourceETag: input.uploadSourceETag }),
       },
       dependencies,
       verifyCapability,

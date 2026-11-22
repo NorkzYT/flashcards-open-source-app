@@ -1,7 +1,7 @@
 import {
   backendRolePassword,
-  boundaryDefinitions,
   disposableDatabaseName,
+  selectBoundaryDefinitions,
 } from "./postgresIntegrations/boundaries.mjs";
 import {
   asError,
@@ -256,6 +256,7 @@ async function runBoundary(
   }
 }
 
+const boundaryDefinitions = selectBoundaryDefinitions(process.env);
 const adminConnection = requireAdminDatabaseConnection();
 const terminalCleanupController = createTerminalCleanupController();
 const mutableWorkSupervisor = createMutableWorkSupervisor();

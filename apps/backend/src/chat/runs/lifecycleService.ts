@@ -53,6 +53,7 @@ import { FAILED_TOOL_CALL_OUTPUT } from "../store";
 import type { ContentPart, UnconvertedContentPart } from "../types";
 import {
   CHAT_RUN_INTERRUPTED_ERROR,
+  CHAT_RUN_OWN_OPENAI_KEY_REQUIRED_ERROR,
   type ChatTerminalError,
   type ChatTerminalErrorCode,
 } from "../terminalErrors";
@@ -71,6 +72,21 @@ import type { AiChatRunClientDevice } from "../../productAnalytics/serverFacts/r
 import { CHAT_RUN_HEARTBEAT_INTERVAL_MS, isChatRunHeartbeatStale } from "../worker/lease";
 import { getChatRunClaimStateWithExecutor } from "./claimFence";
 import { transactionWithChatWorkerOwnerScope } from "./ownerScope";
+import {
+  assertStandaloneChatRunDispatchLeaseWithExecutor,
+  enqueueStandaloneChatRunDispatchWithExecutor,
+  takeStandaloneChatRunDispatchCredentialWithExecutor,
+  type StandaloneChatRunDispatchLease,
+} from "./standaloneDispatch";
+import {
+  openStandaloneCredential,
+  StandaloneCredentialUnavailableError,
+  type SealedStandaloneCredential,
+  type StandaloneCredentialBinding,
+  type StandaloneCredentialKeyring,
+} from "./standaloneCredential";
+import type { UserOpenAIApiKey } from "../userOpenAIApiKey";
+import { isStandaloneChatDeployment } from "../deployment";
 import {
   createDiagnostics,
   finalizeCancelledRunWithExecutor,
@@ -96,6 +112,7 @@ import {
 import type {
   ChatRunClaimToken,
   ChatRunHeartbeatState,
+  ChatRunStatus,
   ChatRunStopState,
   ClaimedChatRun,
   PreparedChatRun,
@@ -180,6 +197,8 @@ export async function prepareChatRun(
   aiConsentId?: string | null,
   browserGuestTrial?: BrowserGuestTrialContext,
   guestCredential?: ChatGuestCredential,
+  /** Standalone only: seals the person's own key for the new run's dispatch (never set in AWS mode). */
+  sealStandaloneUserCredential?: (binding: StandaloneCredentialBinding) => SealedStandaloneCredential,
 ): Promise<PreparedChatRun> {
   const observationScope = createBackendObservationScope(
     "backend-api",
@@ -195,6 +214,11 @@ export async function prepareChatRun(
     null,
   );
   let uploadedAttachments: ReadonlyArray<UploadedChatAttachment> = [];
+  // Read before the transaction so a misconfigured deployment fails before anything is written.
+  const enqueueStandaloneDispatch = isStandaloneChatDeployment();
+  if (sealStandaloneUserCredential !== undefined && !enqueueStandaloneDispatch) {
+    throw new Error("A personal key is persisted (sealed) only for standalone dispatch");
+  }
   return transactionWithWorkspaceScope({ userId, workspaceId }, async (executor) => {
     if (browserGuestTrial !== undefined) {
       await acquireBrowserGuestTrialLifecycleInExecutor(executor, browserGuestTrial);
@@ -295,6 +319,14 @@ export async function prepareChatRun(
       run.run_id,
       new Date(),
     );
+    if (enqueueStandaloneDispatch) {
+      // Only the new-run branch enqueues, so a replayed POST never adds a second dispatch.
+      await enqueueStandaloneChatRunDispatchWithExecutor(executor, scope, {
+        runId: run.run_id,
+        sessionId: session.session_id,
+        chatRequestId: requestId,
+      }, sealStandaloneUserCredential ?? null);
+    }
     await clearActiveChatComposerSuggestionGenerationWithExecutor(
       executor,
       scope,
@@ -320,13 +352,48 @@ export async function prepareChatRun(
 }
 
 /**
- * Claims a queued or stale running chat run for worker execution and rebuilds the local replay context.
+ * `queued_or_stale` is the Lambda contract: a redelivered event may take over a running run whose
+ * heartbeat went stale. `standalone_dispatch_lease` is the standalone contract: only the exact current
+ * holder of the run's dispatch lease may claim, only a `queued` run is claimable (one that ever left
+ * `queued` may have reached the provider or run a tool, so recovery interrupts it instead), and from the
+ * claim on the run's own `worker_claimed_at` fence guards every write.
+ */
+export type ChatRunClaimMode =
+  | "queued_or_stale"
+  | Readonly<{
+    mode: "standalone_dispatch_lease";
+    lease: StandaloneChatRunDispatchLease;
+    /** Null when the worker has no credential key: a run that needs a personal key is then interrupted. */
+    credentialKeyring: StandaloneCredentialKeyring | null;
+    /** `user-key` funding: a run without a sealed personal key ends without a provider call. */
+    personalCredentialRequired: boolean;
+  }>;
+
+function requireLeaseForRun(
+  lease: StandaloneChatRunDispatchLease,
+  userId: string,
+  workspaceId: string,
+  runId: string,
+): void {
+  if (lease.runId !== runId || lease.userId !== userId || lease.workspaceId !== workspaceId) {
+    throw new Error("Standalone dispatch lease does not match the run it was presented for");
+  }
+}
+
+/**
+ * Claims a queued (or, in `queued_or_stale` mode, stale running) chat run for worker execution and
+ * rebuilds the local replay context.
  */
 export async function claimChatRun(
   userId: string,
   workspaceId: string,
   runId: string,
+  claimMode: ChatRunClaimMode = "queued_or_stale",
 ): Promise<ClaimedChatRun | null> {
+  const lease = claimMode === "queued_or_stale" ? null : claimMode.lease;
+  const credentialKeyring = claimMode === "queued_or_stale" ? null : claimMode.credentialKeyring;
+  const personalCredentialRequired = claimMode !== "queued_or_stale" && claimMode.personalCredentialRequired;
+  if (lease !== null) requireLeaseForRun(lease, userId, workspaceId, runId);
   return transactionWithChatWorkerOwnerScope(userId, workspaceId, async (executor, scope) => {
     // Account and credential locks precede domain row locks, as in guest conversion.
     const queuedRun = await selectChatRunWithExecutor(executor, scope, runId);
@@ -334,6 +401,12 @@ export async function claimChatRun(
     const guestSessionId = queuedRun.initiating_guest_session_id;
     const guestCanReadInstructions = guestSessionId !== null
       && await isEligibleChatGuestInExecutor(executor, scope.userId, { sessionId: guestSessionId });
+
+    // The dispatch row is locked before the run row and stays locked to commit, so recovery cannot
+    // requeue or re-lease it under this claim; a lost or expired lease claims nothing.
+    if (lease !== null && !await assertStandaloneChatRunDispatchLeaseWithExecutor(executor, lease)) {
+      return null;
+    }
 
     const run = await selectChatRunForUpdateWithExecutor(executor, scope, runId);
     if (run === null) {
@@ -351,6 +424,9 @@ export async function claimChatRun(
     }
 
     if (run.status === "running") {
+      if (lease !== null) {
+        return null;
+      }
       const heartbeatAt = run.worker_heartbeat_at === null
         ? null
         : new Date(run.worker_heartbeat_at).getTime();
@@ -359,6 +435,28 @@ export async function claimChatRun(
       }
     } else if (run.status !== "queued") {
       return null;
+    }
+
+    // Taken (deleted) under the lease in this transaction: committed with the claim, or kept for the next
+    // holder if the claim rolls back. A run that needs the person's key never falls back to the operator's.
+    let userOpenAIApiKey: UserOpenAIApiKey | null = null;
+    if (lease !== null) {
+      const taken = await takeStandaloneChatRunDispatchCredentialWithExecutor(executor, lease);
+      if (taken.required) {
+        try {
+          userOpenAIApiKey = openStandaloneCredential(credentialKeyring, lease, taken.sealed, new Date());
+        } catch (error) {
+          if (!(error instanceof StandaloneCredentialUnavailableError)) throw error;
+          // Missing, expired, mis-bound, wrong key or no key on this worker: the turn ends interrupted
+          // (the person can resend with the key) and nothing reaches the provider.
+          await finalizeInterruptedRunWithExecutor(executor, scope, run, CHAT_RUN_INTERRUPTED_ERROR);
+          return null;
+        }
+      } else if (personalCredentialRequired) {
+        // No operator key exists to run it on, and none may be borrowed: end it before any provider call.
+        await finalizeInterruptedRunWithExecutor(executor, scope, run, CHAT_RUN_OWN_OPENAI_KEY_REQUIRED_ERROR);
+        return null;
+      }
     }
 
     const claimedRun = requireRunRow(
@@ -395,6 +493,7 @@ export async function claimChatRun(
     return {
       runId: claimedRun.run_id,
       claimToken,
+      userOpenAIApiKey,
       sessionId: claimedRun.session_id,
       requestId: claimedRun.request_id,
       userId: scope.userId,
@@ -734,6 +833,38 @@ export async function markQueuedChatRunDispatchFailed(
     }
 
     await finalizeInterruptedRunWithExecutor(executor, scope, run, CHAT_RUN_INTERRUPTED_ERROR);
+  });
+}
+
+/**
+ * Interrupts a standalone run whose dispatch recovery found abandoned: still `queued` after its bounded
+ * delivery attempts, or `running` with a stale heartbeat. The second case may have reached the provider
+ * or a tool, so it ends as `interrupted` (the user can retry) and is never executed again. A run whose
+ * heartbeat is fresh again, or that already ended, is left alone.
+ */
+export async function interruptAbandonedStandaloneChatRun(
+  lease: StandaloneChatRunDispatchLease,
+): Promise<Readonly<{ leaseHeld: boolean; foundStatus: ChatRunStatus | null; interrupted: boolean }>> {
+  return transactionWithChatWorkerOwnerScope(lease.userId, lease.workspaceId, async (executor, scope) => {
+    // Same lock order as the claim: the recoverer must still hold the exact lease it was handed.
+    if (!await assertStandaloneChatRunDispatchLeaseWithExecutor(executor, lease)) {
+      return { leaseHeld: false, foundStatus: null, interrupted: false };
+    }
+    const run = await selectChatRunForUpdateWithExecutor(executor, scope, lease.runId);
+    if (run === null) {
+      return { leaseHeld: true, foundStatus: null, interrupted: false };
+    }
+    if (run.status === "running") {
+      const heartbeatAt = run.worker_heartbeat_at === null ? null : new Date(run.worker_heartbeat_at).getTime();
+      if (!isChatRunHeartbeatStale(heartbeatAt, Date.now())) {
+        return { leaseHeld: true, foundStatus: run.status, interrupted: false };
+      }
+    } else if (run.status !== "queued") {
+      return { leaseHeld: true, foundStatus: run.status, interrupted: false };
+    }
+
+    await finalizeInterruptedRunWithExecutor(executor, scope, run, CHAT_RUN_INTERRUPTED_ERROR);
+    return { leaseHeld: true, foundStatus: run.status, interrupted: true };
   });
 }
 

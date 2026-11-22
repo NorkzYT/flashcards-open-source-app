@@ -249,7 +249,7 @@ export async function runGeneratedMediaScheduledWorkloads(
   };
 }
 
-const scheduledWorkloadDependencies: GeneratedMediaScheduledWorkloadDependencies = {
+export const generatedMediaScheduledWorkloadDependencies: GeneratedMediaScheduledWorkloadDependencies = {
   runPromotionFn: runGeneratedMediaPromotionBatch,
   runCleanupFn: runMediaBlobCleanupBatch,
   runChatFileCleanupFn: runChatFileCleanupBatch,
@@ -280,7 +280,7 @@ async (_event, context) => {
         observationScope,
         signal: abortController.signal,
       },
-      scheduledWorkloadDependencies,
+      generatedMediaScheduledWorkloadDependencies,
     );
     const result = workloadResult.promotion;
     const cleanupResult = workloadResult.cleanup;

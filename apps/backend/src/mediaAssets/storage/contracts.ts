@@ -13,6 +13,7 @@ import type {
   MultipartMediaBlobWriterAttemptExactInput,
 } from "../uploadSessions";
 import type { getMediaAssetsStorageConfig } from "./config";
+import type { CompletedPartsManifestStore } from "./multipart/completedPartsManifest";
 
 export type MediaBlobStorageContext = Readonly<{
   workspaceId: string | null;
@@ -189,6 +190,8 @@ export type PromoteMediaAssetUploadInput = Readonly<{
   sha256: string;
   lastOperationId: string;
   observationScope: BackendObservationScope;
+  /** When set, the promotion copy is fenced on this verified staging ETag (`CopySourceIfMatch`). */
+  uploadSourceETag?: string;
 }>;
 
 export type MediaAssetStorageOperation =
@@ -212,4 +215,6 @@ export type MediaAssetObjectContentHash = Readonly<{
 export type MediaAssetStorageDependencies = Readonly<{
   s3Client: S3Client;
   getMediaAssetsStorageConfigFn: typeof getMediaAssetsStorageConfig;
+  /** Required by multipart completion and reconciliation under the `rustfs` profile. */
+  completedPartsManifestStore?: CompletedPartsManifestStore;
 }>;

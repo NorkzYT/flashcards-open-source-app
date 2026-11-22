@@ -28,3 +28,9 @@ export const CHAT_RUN_INTERRUPTED_ERROR: ChatTerminalError = {
   code: "CHAT_RUN_INTERRUPTED",
   message: "The AI response was interrupted before it finished. Please try again.",
 };
+
+/** A keyless run reached a worker of a `user-key` standalone server (queued before the switch, say). */
+export const CHAT_RUN_OWN_OPENAI_KEY_REQUIRED_ERROR: ChatTerminalError = {
+  code: null,
+  message: "This self-hosted server runs AI chat only with your own OpenAI API key. Add your key in AI settings and send the message again.",
+};

@@ -13,6 +13,8 @@ import { isTransientDatabaseError } from "./databaseErrors.js";
 import { parseCookieDomainCandidates, resolveCookieDomain } from "./cookieDomain.js";
 import { log } from "./logger.js";
 import { assertVerifiedPrincipalSession, PrincipalSessionError } from "./social/principalSessions.js";
+import { getIdentityProviderMode } from "./local/localIdentityConfig.js";
+import { verifyLocalIdToken } from "./local/localTokens.js";
 
 // 400 days, the browser cap on cookie lifetime.
 const SESSION_COOKIE_MAX_AGE_SECONDS = 34_560_000;
@@ -63,7 +65,17 @@ function getClientId(): string {
   return clientId;
 }
 
-function getVerifier(): ReturnType<typeof CognitoJwtVerifier.create> {
+type IdTokenVerifier = Readonly<{
+  verify: (token: string) => Promise<Readonly<{ sub: string; auth_time?: unknown; [claim: string]: unknown }>>;
+}>;
+
+const localVerifier: IdTokenVerifier = { verify: verifyLocalIdToken };
+
+/** AUTH_IDENTITY_PROVIDER=local verifies this deployment's own tokens; Cognito stays the default. */
+function getVerifier(): IdTokenVerifier {
+  if (getIdentityProviderMode() === "local") {
+    return localVerifier;
+  }
   if (verifier !== undefined) {
     return verifier;
   }

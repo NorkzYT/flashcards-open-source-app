@@ -48,6 +48,8 @@ import { getDatabaseErrorSqlState, isTransientDatabaseError } from "./server/dat
 import { isCognitoProviderOutage } from "./server/cognito/cognitoErrors.js";
 import { getCognitoOutageLogFields, reportCognitoProviderOutage } from "./server/cognito/cognitoOutageReport.js";
 import { log } from "./server/logger.js";
+import { getIdentityProviderMode } from "./server/local/localIdentityConfig.js";
+import { getPublicAuthBaseUrl } from "./server/publicUrls.js";
 import { continueAuthTrace } from "./server/sentry.js";
 
 const apiCorsAllowHeaders = [
@@ -319,7 +321,10 @@ function createMountedApp(basePath: string): Hono<AuthAppEnv> {
     const origin = c.req.header("origin");
     if (origin !== undefined) {
       const requestOrigin = new URL(c.req.url).origin;
-      const isSameOriginRequest = origin === requestOrigin;
+      // Standalone runs behind a TLS-terminating proxy, so the request URL is http:// while the
+      // browser sends the configured https origin; that exact configured origin is this service.
+      const isSameOriginRequest = origin === requestOrigin
+        || (getIdentityProviderMode() === "local" && origin === getPublicAuthBaseUrl(c.req.url));
       if (!isSameOriginRequest && !allowedApiOrigins.includes(origin)) {
         return c.json({ error: "Origin is not allowed" }, 403);
       }

@@ -1,4 +1,5 @@
 import { posix } from "node:path";
+import { isChatSandboxAvailable, STANDALONE_SANDBOX_UNAVAILABLE_MESSAGE } from "../../deployment";
 import type OpenAI from "openai";
 import type { z } from "zod";
 import { createChatFileDownloadUrl, getChatFileObjectBytes, listChatSessionFiles } from "../../../chatFiles";
@@ -116,6 +117,12 @@ async function viewPdfPage(
   page: number,
   context: OpenAIToolContext,
 ): Promise<Readonly<{ result: ExecutedChatToolCall; sandboxRequestId: string | null }>> {
+  if (!isChatSandboxAvailable()) {
+    return {
+      result: createViewFileFailure("SandboxUnavailable", `${STANDALONE_SANDBOX_UNAVAILABLE_MESSAGE}, so PDF pages cannot be shown.`),
+      sandboxRequestId: null,
+    };
+  }
   const invocation = await invokeChatSandbox({
     prepare: async (): Promise<ChatSandboxPdfPageRequest> => ({
       operation: "pdf_page",

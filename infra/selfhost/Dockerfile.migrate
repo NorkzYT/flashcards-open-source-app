@@ -1,0 +1,8 @@
+# Standalone migration image: the repository's migration driver and SQL only.
+FROM postgres:18.7-alpine
+COPY scripts/deploy/migrate.sh /scripts/deploy/migrate.sh
+COPY db/ /db/
+COPY infra/selfhost/migrate-entrypoint.sh /entrypoint.sh
+RUN chmod 0555 /entrypoint.sh /scripts/deploy/migrate.sh
+USER postgres
+ENTRYPOINT ["/entrypoint.sh"]

@@ -1,6 +1,11 @@
 import type { AccountKind } from "../billing/limits";
 import { resolveEntitlementForUserWithoutRefresh, type EntitlementWire } from "../billing/snapshot";
 import {
+  isStandaloneChatDeployment,
+  readStandaloneAiFunding,
+  readStandaloneAiMonthlyMessages,
+} from "../chat/deployment";
+import {
   aiWeightedOutputTokenMultiplier,
   getAiUsageMonthWindow,
   loadAiUsageMessagesForMonth,
@@ -77,7 +82,7 @@ export async function loadAiUsageStatus(
   const month = getAiUsageMonthWindow(now);
   const messages = await loadAiUsageMessagesForMonth(userId, month);
   const usedWeightedTokens = await loadAiUsageWeightedTokensForMonth(userId, month);
-  const monthlyMessages = entitlement.limits.aiMonthlyMessages;
+  const monthlyMessages = resolveReportedMonthlyMessages(entitlement.limits.aiMonthlyMessages);
 
   return {
     accountKind,
@@ -95,4 +100,16 @@ export async function loadAiUsageStatus(
       weightedOutputTokenMultiplier: aiWeightedOutputTokenMultiplier,
     },
   };
+}
+
+/**
+ * The platform-key allowance enforcement actually applies. A standalone server enforces its own operator
+ * allowance (`../chat/standaloneAllowance.ts`), not the hosted tier's, and with `user-key` funding there
+ * is no platform key at all, so zero platform-key messages remain (own-key turns never count).
+ */
+function resolveReportedMonthlyMessages(hostedMonthlyMessages: number | null): number | null {
+  if (!isStandaloneChatDeployment()) {
+    return hostedMonthlyMessages;
+  }
+  return readStandaloneAiFunding() === "user-key" ? 0 : readStandaloneAiMonthlyMessages();
 }

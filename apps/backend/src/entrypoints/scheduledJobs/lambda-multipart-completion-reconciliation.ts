@@ -171,6 +171,65 @@ export function reportMultipartCompletionReconciliationTerminalFailure(
   addBackendSentryBreadcrumb(event);
 }
 
+export type MultipartCompletionScheduledWorkloadInput = Readonly<{
+  /** Identifies this run in the lease owners; the Lambda passes its request id. */
+  invocationId: string;
+  deadlineAtMs: number;
+  observationScope: BackendObservationScope;
+  signal: AbortSignal;
+}>;
+
+/**
+ * One bounded run: failure reports first, then completion reconciliation. A failure is captured with
+ * its partial results and rethrown. Shared by the Lambda handler and the standalone maintenance process.
+ */
+export async function runMultipartCompletionScheduledWorkloads(
+  input: MultipartCompletionScheduledWorkloadInput,
+): Promise<MultipartCompletionReconciliationBatchResult> {
+  let failureReportResult: MultipartCompletionFailureReportBatchResult | null =
+    null;
+  try {
+    failureReportResult = await runMultipartCompletionFailureReportBatch({
+      leaseOwner:
+        `multipart-completion-failure-report:${input.invocationId}`,
+      leaseDurationMs: multipartCompletionReconciliationLeaseDurationMs,
+      maximumReports: multipartCompletionFailureReportMaximumJobs,
+      deadlineAtMs: input.deadlineAtMs,
+      reportTerminalFailure: (details) =>
+        reportMultipartCompletionReconciliationTerminalFailure(
+          details,
+          input.observationScope,
+        ),
+      signal: input.signal,
+    });
+    const result = await runMultipartCompletionReconciliationBatch({
+      leaseOwner: `multipart-completion-reconciliation:${input.invocationId}`,
+      leaseDurationMs: multipartCompletionReconciliationLeaseDurationMs,
+      maximumJobs: multipartCompletionReconciliationMaximumJobs,
+      deadlineAtMs: input.deadlineAtMs,
+      observationScope: input.observationScope,
+      signal: input.signal,
+    });
+    reportMultipartCompletionReconciliationBatchCompleted(
+      result,
+      failureReportResult,
+      input.observationScope,
+    );
+    return result;
+  } catch (error) {
+    captureBackendException({
+      action: "multipart_completion_reconciliation_batch_failed",
+      error: normalizeCaughtError(error),
+      scope: input.observationScope,
+      details: getMultipartCompletionReconciliationFailureDetails(
+        error,
+        failureReportResult,
+      ),
+    });
+    throw error;
+  }
+}
+
 const multipartCompletionReconciliationHandler: Handler<
   unknown,
   MultipartCompletionReconciliationResponse
@@ -200,35 +259,13 @@ const multipartCompletionReconciliationHandler: Handler<
     ),
     Math.max(0, deadlineAtMs - Date.now()),
   );
-  let failureReportResult: MultipartCompletionFailureReportBatchResult | null =
-    null;
   try {
-    failureReportResult = await runMultipartCompletionFailureReportBatch({
-      leaseOwner:
-        `multipart-completion-failure-report:${context.awsRequestId}`,
-      leaseDurationMs: multipartCompletionReconciliationLeaseDurationMs,
-      maximumReports: multipartCompletionFailureReportMaximumJobs,
-      deadlineAtMs,
-      reportTerminalFailure: (details) =>
-        reportMultipartCompletionReconciliationTerminalFailure(
-          details,
-          observationScope,
-        ),
-      signal: abortController.signal,
-    });
-    const result = await runMultipartCompletionReconciliationBatch({
-      leaseOwner: `multipart-completion-reconciliation:${context.awsRequestId}`,
-      leaseDurationMs: multipartCompletionReconciliationLeaseDurationMs,
-      maximumJobs: multipartCompletionReconciliationMaximumJobs,
+    const result = await runMultipartCompletionScheduledWorkloads({
+      invocationId: context.awsRequestId,
       deadlineAtMs,
       observationScope,
       signal: abortController.signal,
     });
-    reportMultipartCompletionReconciliationBatchCompleted(
-      result,
-      failureReportResult,
-      observationScope,
-    );
     return {
       ok: true,
       claimed: result.claimed,
@@ -239,17 +276,6 @@ const multipartCompletionReconciliationHandler: Handler<
       leaseLost: result.leaseLost,
       rescheduled: result.rescheduled,
     };
-  } catch (error) {
-    captureBackendException({
-      action: "multipart_completion_reconciliation_batch_failed",
-      error: normalizeCaughtError(error),
-      scope: observationScope,
-      details: getMultipartCompletionReconciliationFailureDetails(
-        error,
-        failureReportResult,
-      ),
-    });
-    throw error;
   } finally {
     clearTimeout(deadlineTimer);
   }

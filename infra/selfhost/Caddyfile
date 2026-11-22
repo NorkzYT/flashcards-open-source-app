@@ -1,0 +1,162 @@
+# Standalone gateway: one listener, routed strictly by Host. Unknown hosts are refused (fail closed).
+# TLS is terminated by the operator's reverse proxy, or by Caddy itself when the optional
+# compose.tls.yml overlay is used. See docs/self-hosting.md.
+{
+	admin off
+	auto_https off
+	servers {
+		# Only these peers may supply X-Forwarded-For; others are replaced by the peer address.
+		trusted_proxies static {$GATEWAY_TRUSTED_PROXIES}
+		# Walk X-Forwarded-For from the right, skipping trusted proxies, so a client-supplied
+		# leftmost value can never become the client address.
+		trusted_proxies_strict
+		client_ip_headers X-Forwarded-For
+	}
+}
+
+(proxy_headers) {
+	# The auth service reads this Cloudflare header first; it must never come from a client.
+	header_up -Cf-Connecting-Ip
+	header_up -X-Real-Ip
+	# Upstreams read the leftmost entry; send exactly the address Caddy resolved.
+	header_up X-Forwarded-For {client_ip}
+}
+
+(media_proxy) {
+	@app_origin header Origin https://{$NIBOMO_APP_HOST}
+	header @app_origin {
+		defer
+		Access-Control-Allow-Origin "https://{$NIBOMO_APP_HOST}"
+		Access-Control-Expose-Headers "Accept-Ranges, Content-Length, Content-Range, ETag, x-amz-checksum-crc32, x-amz-checksum-crc32c, x-amz-checksum-sha256, x-amz-checksum-type"
+		Vary "Origin"
+	}
+	reverse_proxy objectstore:9000 {
+		import proxy_headers
+		header_down -Access-Control-Allow-Origin
+		header_down -Access-Control-Allow-Credentials
+		header_down -Access-Control-Allow-Methods
+		header_down -Access-Control-Allow-Headers
+		header_down -Access-Control-Expose-Headers
+		header_down -Access-Control-Max-Age
+		# Stream uploads and downloads without buffering.
+		flush_interval -1
+	}
+}
+
+:8080 {
+	@app host {$NIBOMO_APP_HOST}
+	handle @app {
+		root * /srv/web
+		header /assets/* Cache-Control "public, max-age=31536000, immutable"
+		try_files {path} /index.html
+		file_server
+	}
+
+	@api host {$NIBOMO_API_HOST}
+	handle @api {
+		reverse_proxy backend:8080 {
+			import proxy_headers
+		}
+	}
+
+	# MCP: the server itself checks Host, Origin and the bearer token; the gateway only routes.
+	@mcp host {$NIBOMO_MCP_HOST} {$NIBOMO_MCP_ALTERNATE_HOST}
+	handle @mcp {
+		reverse_proxy mcp:8082 {
+			import proxy_headers
+		}
+	}
+
+	@auth host {$NIBOMO_AUTH_HOST}
+	handle @auth {
+		reverse_proxy auth:8081 {
+			import proxy_headers
+		}
+	}
+
+	# Media: presigned object requests only, forwarded to RustFS with the Host, path, query and
+	# headers the backend signed (reverse_proxy passes all of them through unchanged by default).
+	# Nothing here caches responses. Refused with 403: unsigned or header-signed requests, bucket
+	# listing and bucket-level calls, multipart calls other than a signed part upload, other
+	# sub-resources, admin and console paths.
+	@media host {$NIBOMO_MEDIA_HOST}
+	handle @media {
+		# CORS for the web app origin only, answered here so the store's own CORS never applies.
+		@preflight {
+			method OPTIONS
+			header Origin https://{$NIBOMO_APP_HOST}
+			path /{$NIBOMO_MEDIA_BUCKET}/*
+			not path /{$NIBOMO_MEDIA_BUCKET}/
+		}
+		handle @preflight {
+			header Access-Control-Allow-Origin "https://{$NIBOMO_APP_HOST}"
+			header Access-Control-Allow-Methods "GET, HEAD, PUT"
+			header Access-Control-Allow-Headers "{http.request.header.Access-Control-Request-Headers}"
+			header Access-Control-Max-Age "3600"
+			header Vary "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
+			respond 204
+		}
+
+		@signed {
+			method GET HEAD PUT
+			path /{$NIBOMO_MEDIA_BUCKET}/*
+			not path /{$NIBOMO_MEDIA_BUCKET}/
+			query X-Amz-Signature=*
+			query X-Amz-Credential=*
+			query X-Amz-Expires=*
+			not header Authorization *
+			not header X-Amz-Copy-Source *
+			not query uploads=*
+			not query uploadId=*
+			not query partNumber=*
+			not query acl=*
+			not query tagging=*
+			not query retention=*
+			not query legal-hold=*
+			not query attributes=*
+			not query select=*
+			not query restore=*
+			not query torrent=*
+			not query versionId=*
+		}
+		# Multipart part upload (S3 UploadPart) only: a backend-signed PUT of one part to a media
+		# upload-session staging key. Create, complete, list, abort, part copy and every other
+		# multipart or bucket call stay refused below. The whole query must consist of the keys the
+		# backend signs (each key once), so no other sub-resource can ride along; the checksum header
+		# the backend signs is required and copy-source headers are refused.
+		@signed_part {
+			method PUT
+			path /{$NIBOMO_MEDIA_BUCKET}/media/uploads/workspaces/*
+			path_regexp ^/[^/]+/media/uploads/workspaces/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/assets/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/sessions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+			query X-Amz-Signature=*
+			query X-Amz-Credential=*
+			query X-Amz-Expires=*
+			query X-Amz-SignedHeaders=*
+			query partNumber=*
+			query uploadId=*
+			vars_regexp {http.request.uri.query} ^(?:X-Amz-Algorithm=AWS4-HMAC-SHA256|X-Amz-Content-Sha256=UNSIGNED-PAYLOAD|X-Amz-Credential=[A-Za-z0-9%._~-]{1,256}|X-Amz-Date=[0-9]{8}T[0-9]{6}Z|X-Amz-Expires=[0-9]{1,6}|X-Amz-Signature=[0-9a-f]{64}|X-Amz-SignedHeaders=[A-Za-z0-9%-]{1,256}|partNumber=(?:[1-9][0-9]{0,3}|10000)|uploadId=[A-Za-z0-9%._~-]{1,1000}|x-id=UploadPart)(?:&(?:X-Amz-Algorithm=AWS4-HMAC-SHA256|X-Amz-Content-Sha256=UNSIGNED-PAYLOAD|X-Amz-Credential=[A-Za-z0-9%._~-]{1,256}|X-Amz-Date=[0-9]{8}T[0-9]{6}Z|X-Amz-Expires=[0-9]{1,6}|X-Amz-Signature=[0-9a-f]{64}|X-Amz-SignedHeaders=[A-Za-z0-9%-]{1,256}|partNumber=(?:[1-9][0-9]{0,3}|10000)|uploadId=[A-Za-z0-9%._~-]{1,1000}|x-id=UploadPart))*$
+			not vars_regexp {http.request.uri.query} (?:^|&)partNumber=.*&partNumber=|(?:^|&)uploadId=.*&uploadId=|(?:^|&)x-id=.*&x-id=|(?:^|&)X-Amz-Algorithm=.*&X-Amz-Algorithm=|(?:^|&)X-Amz-Content-Sha256=.*&X-Amz-Content-Sha256=|(?:^|&)X-Amz-Credential=.*&X-Amz-Credential=|(?:^|&)X-Amz-Date=.*&X-Amz-Date=|(?:^|&)X-Amz-Expires=.*&X-Amz-Expires=|(?:^|&)X-Amz-Signature=.*&X-Amz-Signature=|(?:^|&)X-Amz-SignedHeaders=.*&X-Amz-SignedHeaders=
+			header X-Amz-Checksum-Sha256 *
+			not header Authorization *
+			not header X-Amz-Copy-Source *
+			not header X-Amz-Copy-Source-Range *
+		}
+		handle @signed_part {
+			import media_proxy
+		}
+
+		handle @signed {
+			import media_proxy
+		}
+
+		respond 403
+	}
+
+	handle /__gateway/health {
+		respond "ok" 200
+	}
+
+	handle {
+		respond "Unknown host" 421
+	}
+}

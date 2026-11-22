@@ -1,0 +1,41 @@
+# AI overlay: the operator's OpenAI key for the chat worker and the API's admission check and
+# transcriptions. compose.sh adds this file together with `--profile ai` only when the instance
+# .env sets NIBOMO_AI_PROVIDER=openai and secrets/openai_api_key is non-empty, so the API never
+# accepts chat runs that no worker would execute. The key is read from the secret file at process
+# start and never enters the environment file, `docker inspect` output, job rows or logs.
+#
+# Personal (per-user) keys: refused unless the .env sets NIBOMO_AI_PERSONAL_KEYS=sealed. Then the API
+# stores each one only as AES-GCM ciphertext bound to the run and NIBOMO_INSTANCE_ID, under a key
+# derived from secrets/chat_credential_key, and the worker opens it once at claim; API and worker
+# must see the same file and instance id. Any other non-empty value points at a file that is not
+# mounted, so both services refuse to start instead of silently changing behaviour.
+x-chat-credentials: &chat-credentials
+  NIBOMO_CHAT_CREDENTIAL_KEY_FILE: ${NIBOMO_AI_PERSONAL_KEYS:+/run/secrets/chat_credential_key.${NIBOMO_AI_PERSONAL_KEYS}}
+  NIBOMO_INSTANCE_ID: ${NIBOMO_INSTANCE_ID:-}
+
+services:
+  backend:
+    environment:
+      <<: *chat-credentials
+      OPENAI_API_KEY_FILE: /run/secrets/openai_api_key
+    secrets:
+      - openai_api_key
+      - source: chat_credential_key
+        target: chat_credential_key.sealed
+    # Outbound HTTPS to the provider for the synchronous transcription route.
+    networks: [egress]
+  worker:
+    environment:
+      <<: *chat-credentials
+      OPENAI_API_KEY_FILE: /run/secrets/openai_api_key
+    secrets:
+      - openai_api_key
+      - source: chat_credential_key
+        target: chat_credential_key.sealed
+    networks: [egress]
+
+secrets:
+  openai_api_key:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/openai_api_key
+  chat_credential_key:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/chat_credential_key

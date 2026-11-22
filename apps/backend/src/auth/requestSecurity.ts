@@ -2,10 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import type { AuthRequest } from "./index";
 import { browserGuestCookieName } from "../guestAuth/browser/cookie";
 import { HttpError } from "../shared/errors";
-import {
-  getBackendCsrfSecret,
-  getBackendCsrfSecretWithAbortSignal,
-} from "../aws/secrets";
+import { resolveBackendCsrfSecret } from "./csrfSecret";
 
 /** The origin-bearing headers of a request, trimmed, and empty read as absent. */
 export type RequestOriginHeaders = Readonly<{
@@ -113,15 +110,6 @@ function isMatchingToken(expectedToken: string, actualToken: string): boolean {
   return timingSafeEqual(expectedBytes, actualBytes);
 }
 
-function getBackendCsrfSecretArn(): string {
-  const secretArn = process.env.BACKEND_CSRF_SECRET_ARN;
-  if (secretArn === undefined || secretArn.trim() === "") {
-    throw new Error("BACKEND_CSRF_SECRET_ARN is required for session-based CSRF protection");
-  }
-
-  return secretArn;
-}
-
 /**
  * Reads all auth- and CSRF-related inputs once so routes can share a single
  * source of truth for bearer auth, session auth, and browser protection.
@@ -148,7 +136,7 @@ export function toAuthRequest(requestAuthInputs: RequestAuthInputs): AuthRequest
 
 /** HMAC binds CSRF proof to the actual registered or guest cookie credential. */
 export async function getSessionCsrfToken(sessionToken: string): Promise<string> {
-  const csrfSecret = await getBackendCsrfSecret(getBackendCsrfSecretArn());
+  const csrfSecret = await resolveBackendCsrfSecret(null);
   return createSessionCsrfToken(sessionToken, csrfSecret);
 }
 
@@ -156,10 +144,7 @@ async function getSessionCsrfTokenWithAbortSignal(
   sessionToken: string,
   abortSignal: AbortSignal,
 ): Promise<string> {
-  const csrfSecret = await getBackendCsrfSecretWithAbortSignal(
-    getBackendCsrfSecretArn(),
-    abortSignal,
-  );
+  const csrfSecret = await resolveBackendCsrfSecret(abortSignal);
   return createSessionCsrfToken(sessionToken, csrfSecret);
 }
 

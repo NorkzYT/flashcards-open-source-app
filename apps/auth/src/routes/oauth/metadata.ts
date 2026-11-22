@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { AuthAppEnv } from "../../server/apiErrors.js";
 import { getPublicAuthBaseUrl } from "../../server/publicUrls.js";
-import { getOidcPublicKey } from "../../server/oauth/oidcSigning.js";
+import { getOidcPublicKeys } from "../../server/oauth/oidcSigning.js";
 import { OAUTH_SCOPES } from "../../server/oauth/scopes.js";
 
 type AuthorizationServerMetadata = Readonly<{
@@ -40,9 +40,9 @@ app.get("/.well-known/openid-configuration", (c) => {
 });
 
 app.get("/.well-known/jwks.json", async (c) => {
-  const key = await getOidcPublicKey();
+  const keys = await getOidcPublicKeys();
   c.header("Cache-Control", "public, max-age=3600");
-  return c.json({ keys: [key] });
+  return c.json({ keys });
 });
 
 function buildAuthorizationServerMetadata(issuer: string): AuthorizationServerMetadata {

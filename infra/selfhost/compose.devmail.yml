@@ -1,0 +1,17 @@
+# Test-only overlay: a captured development mailbox instead of real SMTP. compose.sh adds it when the
+# instance .env sets NIBOMO_DEV_MAILBOX=true, and refuses that for project nibomo:
+#   bash sourc/infra/selfhost/compose.sh <test-instance> up -d --build
+# The test .env sets a separate NIBOMO_COMPOSE_PROJECT, NIBOMO_SMTP_HOST=mailpit,
+# NIBOMO_SMTP_PORT=1025, NIBOMO_SMTP_TLS_MODE=none and NIBOMO_DEV_MAILBOX=true. Codes are read from
+# the mailbox API on loopback only.
+services:
+  mailpit:
+    image: axllent/mailpit:v1.29.0
+    networks: [internal, edge]
+    ports:
+      - "127.0.0.1:${NIBOMO_DEVMAIL_UI_PORT:-18025}:8025"
+    restart: "no"
+  auth:
+    depends_on:
+      mailpit:
+        condition: service_started

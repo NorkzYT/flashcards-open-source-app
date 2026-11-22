@@ -1,5 +1,6 @@
 export type AuthConfig =
   | Readonly<{ mode: "cognito" }>
+  | Readonly<{ mode: "local" }>
   | Readonly<{ mode: "none" }>;
 
 let resolvedAuthConfig: AuthConfig | undefined;
@@ -24,7 +25,8 @@ function parseBooleanEnv(value: string | undefined, variableName: string): boole
  * Validates backend auth mode eagerly so the process fails closed on startup
  * instead of silently falling back to insecure local auth.
  *
- * `AUTH_MODE` is always required. `AUTH_MODE=none` is allowed only when
+ * `AUTH_MODE` is always required. `AUTH_MODE=local` verifies tokens from a standalone auth service
+ * running AUTH_IDENTITY_PROVIDER=local (docs/self-hosting.md). `AUTH_MODE=none` is allowed only when
  * `ALLOW_INSECURE_LOCAL_AUTH=true` is set explicitly for local development.
  */
 export function getAuthConfig(): AuthConfig {
@@ -34,11 +36,21 @@ export function getAuthConfig(): AuthConfig {
 
   const authMode = process.env.AUTH_MODE;
   if (authMode === undefined || authMode === "") {
-    throw new Error('AUTH_MODE is required and must be set to "cognito" or "none"');
+    throw new Error('AUTH_MODE is required and must be set to "cognito", "local" or "none"');
   }
 
   if (authMode === "cognito") {
     resolvedAuthConfig = { mode: "cognito" };
+    return resolvedAuthConfig;
+  }
+
+  if (authMode === "local") {
+    // The hosted review-account (demo) bypass has no standalone counterpart; refuse it rather than
+    // let demo inputs change account behavior on a self-hosted deployment.
+    const demoInputs = ["DEMO_EMAIL_DOSTIP", "DEMO_PASSWORD_DOSTIP", "DEMO_PASSWORD_SECRET_ARN"]
+      .filter((name) => (process.env[name] ?? "").trim() !== "");
+    if (demoInputs.length > 0) throw new Error(`${demoInputs.join(", ")} must not be set when AUTH_MODE=local`);
+    resolvedAuthConfig = { mode: "local" };
     return resolvedAuthConfig;
   }
 
@@ -57,7 +69,7 @@ export function getAuthConfig(): AuthConfig {
     return resolvedAuthConfig;
   }
 
-  throw new Error(`AUTH_MODE must be set to "cognito" or "none", got "${authMode}"`);
+  throw new Error(`AUTH_MODE must be set to "cognito", "local" or "none", got "${authMode}"`);
 }
 
 export function resetAuthConfigForTests(): void {

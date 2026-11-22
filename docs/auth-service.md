@@ -7,7 +7,20 @@ Human-run acceptance: [browser](browser-sign-in-hints.md#manual-browser-acceptan
 [Android](../apps/android/docs/native-sign-in-acceptance.md). These procedures distinguish source
 and cloud checks from actual provider, signed-device, mailbox and lifecycle results.
 
-- `AUTH_MODE`: `none` (local dev, no auth) or `cognito` (verify JWT from `Authorization: Bearer`)
+- `AUTH_MODE`: `none` (local dev, no auth), `cognito` (verify JWT from `Authorization: Bearer`), or
+  `local` (standalone self-hosting with `AUTH_IDENTITY_PROVIDER=local` in this service; [self-hosting](self-hosting.md))
+- Standalone sessions (`local` only): each sign-in creates a session family
+  (`db/migrations/0257_standalone_local_session_families.sql`). Every local ID token carries its
+  family as `sid` plus a `jti`, and auth and backend accept it only while
+  `auth.local_session_status` reports the family live for that subject, issuer and audience; the
+  backend role has no read on `auth.local_*`. Logout through either route revokes the family, so
+  issued ID tokens stop before `exp`. Refresh rotates: both refresh routes return the replacement
+  `refreshToken` (the Cognito rotation shape that web, iOS and Android already store). A rotated
+  token may be retried for 60 seconds while its successor is still unused and then yields the same
+  successor, which covers concurrent and lost-response refreshes; any other reuse revokes the family.
+  The review-account (demo) password bypass does not exist in standalone: any `DEMO_*` input refuses
+  auth and backend startup. Upgrading through 0257 ends every existing standalone session: pre-0257
+  refresh tokens are revoked and ID tokens without `sid` are refused, so users sign in again once.
 - Account identity: an account's `user_id` is a surrogate identifier the product owns, and
   `auth.user_identities` maps a Cognito subject to it. The two are not required to be equal, and the
   id is not derived from the subject; the column rule lives in

@@ -1,0 +1,46 @@
+# TEST ONLY: replaces the AI provider with the labeled synthetic provider (ai-test-provider.mjs) on a
+# network with no outbound route, and removes egress from backend and worker, so nothing can reach a
+# real provider. Never part of compose.sh; ai-acceptance.sh adds it (after compose.ai.yml or
+# compose.ai-user-key.yml, and compose.devmail.yml) for a disposable project only. It works for both
+# funding modes: the provider gets no key file, only AI_TEST_FUNDING and the SHA-256 of the synthetic
+# operator key (or `none` for user-key funding), both exported by ai-acceptance.sh, and it refuses
+# project nibomo. Its successful answers are labeled simulations, never real generations.
+services:
+  ai-test-provider:
+    image: node:24.22.3-alpine
+    command: ["node", "/selfhost/ai-test-provider.mjs"]
+    user: node
+    read_only: true
+    environment:
+      AI_TEST_PROJECT: ${NIBOMO_COMPOSE_PROJECT:?}
+      AI_TEST_FUNDING: ${AI_TEST_FUNDING:?set by ai-acceptance.sh}
+      AI_TEST_OPERATOR_KEY_SHA256: ${AI_TEST_OPERATOR_KEY_SHA256:?set by ai-acceptance.sh}
+    volumes:
+      - ./ai-test-provider.mjs:/selfhost/ai-test-provider.mjs:ro
+    labels:
+      com.nibomo.test: synthetic-ai-provider
+    networks: [ai-test]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/__test/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+  backend:
+    depends_on:
+      ai-test-provider:
+        condition: service_healthy
+    environment:
+      OPENAI_BASE_URL: http://ai-test-provider:8080/v1
+    networks: !override [internal, app, storage, ai-test]
+  worker:
+    depends_on:
+      ai-test-provider:
+        condition: service_healthy
+    environment:
+      OPENAI_BASE_URL: http://ai-test-provider:8080/v1
+    networks: !override [internal, storage, ai-test]
+
+networks:
+  ai-test:
+    internal: true

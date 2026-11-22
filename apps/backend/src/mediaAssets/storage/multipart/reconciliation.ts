@@ -38,10 +38,20 @@ import {
   uploadProofMediaAssetIdKey,
   uploadProofWorkspaceIdKey,
 } from "../proof";
+import {
+  CompletedPartsManifestInvalidError,
+  parseCompletedPartsManifest,
+  type CompletedPartsManifestPart,
+} from "./completedPartsManifest";
+import {
+  createThrottledProgress,
+  readMultipartObjectContentUnderETag,
+} from "./rustfsMultipartContent";
 
 const maximumMultipartPartCount = 10_000;
 const listPartsPageSize = 1_000;
 const sha256Pattern = /^[0-9a-f]{64}$/u;
+const verificationLeaseRenewalIntervalMs = 5_000;
 
 type ListedMultipartPart = Readonly<{
   partNumber: number;
@@ -400,10 +410,31 @@ function readListedPart(
     ETag?: string;
     ChecksumSHA256?: string;
   }>,
+  manifestParts: ReadonlyArray<CompletedPartsManifestPart> | null,
 ): ListedMultipartPart {
   const partNumber = part.PartNumber;
   const eTag = part.ETag;
-  const sha256 = toHexSha256Digest(part.ChecksumSHA256);
+  const listedSha256 = toHexSha256Digest(part.ChecksumSHA256);
+  const manifestPart = manifestParts === null || typeof partNumber !== "number"
+    ? undefined
+    : manifestParts[partNumber - 1];
+  // RustFS lists no part checksum; the SHA-256 then comes from the manifest that
+  // hashes to the fingerprint, and the listed ETag must equal the manifest's ETag.
+  if (
+    manifestParts !== null
+    && (
+      manifestPart === undefined
+      || manifestPart.partNumber !== partNumber
+      || manifestPart.eTag !== eTag
+      || (listedSha256 !== null && listedSha256 !== manifestPart.sha256)
+    )
+  ) {
+    throw createTerminalStorageError(
+      "MULTIPART_PARTS_FINGERPRINT_MISMATCH",
+      "S3 multipart parts do not match the immutable completion manifest.",
+    );
+  }
+  const sha256 = manifestPart === undefined ? listedSha256 : manifestPart.sha256;
   if (
     typeof partNumber !== "number"
     || Number.isSafeInteger(partNumber) === false
@@ -423,11 +454,59 @@ function readListedPart(
   return { partNumber, eTag, sha256 };
 }
 
+async function loadCompletedPartsManifestParts(
+  input: ReconcileMultipartMediaAssetUploadInput,
+  dependencies: MediaAssetStorageDependencies,
+): Promise<ReadonlyArray<CompletedPartsManifestPart>> {
+  const store = dependencies.completedPartsManifestStore;
+  if (store === undefined) {
+    throw createTerminalStorageError(
+      "S3_REQUEST_REJECTED",
+      "Multipart reconciliation under this storage profile requires the completed-parts manifest store.",
+    );
+  }
+  input.signal.throwIfAborted();
+  await input.renewLease();
+  input.signal.throwIfAborted();
+  const stored = await store.read(input.completedPartsFingerprint);
+  input.signal.throwIfAborted();
+  if (stored === null) {
+    throw createTerminalStorageError(
+      "MULTIPART_PARTS_INVALID",
+      "No completed-parts manifest was recorded for this multipart completion fingerprint.",
+    );
+  }
+  try {
+    if (stored.partCount !== input.partCount) {
+      throw new CompletedPartsManifestInvalidError(
+        "Completed-parts manifest part count differs from the durable completion.",
+      );
+    }
+    return parseCompletedPartsManifest(
+      stored.manifest,
+      input.completedPartsFingerprint,
+      input.partCount,
+    );
+  } catch (error) {
+    if (error instanceof CompletedPartsManifestInvalidError) {
+      throw createTerminalStorageError(
+        "MULTIPART_PARTS_INVALID",
+        "Stored completed-parts manifest does not match the durable completion fingerprint.",
+      );
+    }
+    throw error;
+  }
+}
+
 async function listMultipartParts(
   input: ReconcileMultipartMediaAssetUploadInput,
   bucketName: string,
   dependencies: MediaAssetStorageDependencies,
 ): Promise<ReadonlyArray<ListedMultipartPart>> {
+  const manifestParts =
+    dependencies.getMediaAssetsStorageConfigFn().profile === "rustfs"
+      ? await loadCompletedPartsManifestParts(input, dependencies)
+      : null;
   const parts: Array<ListedMultipartPart> = [];
   let partNumberMarker: string | undefined;
   while (true) {
@@ -466,7 +545,7 @@ async function listMultipartParts(
     }
 
     for (const rawPart of response.Parts ?? []) {
-      parts.push(readListedPart(rawPart));
+      parts.push(readListedPart(rawPart, manifestParts));
       if (parts.length > maximumMultipartPartCount) {
         throw createTerminalStorageError(
           "MULTIPART_PARTS_INVALID",
@@ -608,12 +687,94 @@ async function completeMultipartUpload(
   );
 }
 
+/**
+ * RustFS replacement for the normalizing self-copy (which stays COMPOSITE there):
+ * the staging object must match its shape and ownership proof, and every byte of
+ * that same entity (GET `If-Match` the HEAD ETag) must hash to the durable SHA-256
+ * with the durable length. Returns the ETag that fences the promotion copy.
+ */
+async function verifyRustfsStagingObject(
+  input: ReconcileMultipartMediaAssetUploadInput,
+  metadata: MediaAssetObjectMetadata,
+  bucketName: string,
+  dependencies: MediaAssetStorageDependencies,
+): Promise<string> {
+  assertStagingShapeAndProof(input, metadata);
+  const eTag = metadata.eTag;
+  if (eTag === null) {
+    throw createTerminalStorageError(
+      "MULTIPART_STAGING_OBJECT_MISMATCH",
+      "Multipart staging object is missing the ETag required for fenced verification.",
+    );
+  }
+  const renewDuringRead = createThrottledProgress(
+    input.renewLease,
+    verificationLeaseRenewalIntervalMs,
+    Date.now,
+  );
+  let observation: Awaited<ReturnType<typeof readMultipartObjectContentUnderETag>>;
+  try {
+    observation = await runS3Operation(
+      input,
+      "get_object",
+      async () => readMultipartObjectContentUnderETag(
+        dependencies.s3Client,
+        bucketName,
+        input.stagingStorageKey,
+        eTag,
+        input.sizeBytes,
+        input.signal,
+        renewDuringRead,
+      ),
+    );
+  } catch (error) {
+    input.signal.throwIfAborted();
+    if (!(error instanceof S3OperationRejectedError)) throw error;
+    const statusCode = getS3ErrorStatusCode(error.s3Error);
+    if (statusCode === 412 || isMissingS3ObjectError(error.s3Error)) {
+      // The entity changed or vanished after HEAD; a later run re-verifies from scratch.
+      throw new MultipartCompletionReconciliationStorageTransientError(
+        "get_object",
+        statusCode,
+        error.s3Error,
+      );
+    }
+    throw createTerminalS3StorageError(
+      input,
+      "get_object",
+      `Object storage rejected multipart staging verification GET. statusCode=${String(statusCode)}`,
+      error.s3Error,
+    );
+  }
+  if (
+    observation.metadata.eTag !== eTag
+    || observation.sha256 === null
+    || observation.sha256 !== input.sha256
+    || observation.sizeBytes !== input.sizeBytes
+  ) {
+    throw createTerminalStorageError(
+      "MULTIPART_STAGING_OBJECT_MISMATCH",
+      "Multipart staging object bytes do not match the durable completion SHA-256 and size.",
+    );
+  }
+  assertStagingShapeAndProof(input, observation.metadata);
+  return eTag;
+}
+
 async function normalizeStagingObject(
   input: ReconcileMultipartMediaAssetUploadInput,
   initialMetadata: MediaAssetObjectMetadata,
   bucketName: string,
   dependencies: MediaAssetStorageDependencies,
-): Promise<void> {
+): Promise<string | null> {
+  if (dependencies.getMediaAssetsStorageConfigFn().profile === "rustfs") {
+    return verifyRustfsStagingObject(
+      input,
+      initialMetadata,
+      bucketName,
+      dependencies,
+    );
+  }
   let metadata = initialMetadata;
   for (
     let attempt = 1;
@@ -622,7 +783,7 @@ async function normalizeStagingObject(
   ) {
     if (metadata.checksumType === "FULL_OBJECT") {
       assertStagingFullObject(input, metadata);
-      return;
+      return null;
     }
     assertStagingShapeAndProof(input, metadata);
     if (metadata.eTag === null) {
@@ -701,6 +862,7 @@ async function promoteStagingObject(
   input: ReconcileMultipartMediaAssetUploadInput,
   bucketName: string,
   dependencies: MediaAssetStorageDependencies,
+  verifiedStagingETag: string | null,
 ): Promise<void> {
   let existing = await headObject(
     input,
@@ -728,6 +890,9 @@ async function promoteStagingObject(
         bucketName,
         input.stagingStorageKey,
       ),
+      ...(verifiedStagingETag === null
+        ? {}
+        : { CopySourceIfMatch: verifiedStagingETag }),
       ContentType: input.mimeType,
       ChecksumAlgorithm: "SHA256",
       IfNoneMatch: "*",
@@ -860,11 +1025,16 @@ export async function reconcileMultipartMediaAssetUploadWithDependencies(
     }
   }
 
-  await normalizeStagingObject(
+  const verifiedStagingETag = await normalizeStagingObject(
     input,
     staging,
     bucketName,
     dependencies,
   );
-  await promoteStagingObject(input, bucketName, dependencies);
+  await promoteStagingObject(
+    input,
+    bucketName,
+    dependencies,
+    verifiedStagingETag,
+  );
 }

@@ -479,8 +479,12 @@ test("multipart commit-unknown replay is bounded by the exact request deadline",
 });
 
 test("multipart exact resolution retries transient and unknown database outcomes", async () => {
+  // One observation fixes the confirmed lease for both resolutions, as a lease read from the
+  // database does not move with wall time; neither resolution waits for it to expire.
+  const observedAtMs = Date.now();
+  const leaseExpiresAtMs = observedAtMs + 10_000;
   const requestDeadline = createMultipartCompletionRequestDeadline(
-    Date.now() + 1_000,
+    observedAtMs + 15_000,
   );
   let transientAttempts = 0;
   let unknownCommitAttempts = 0;
@@ -499,7 +503,7 @@ test("multipart exact resolution retries transient and unknown database outcomes
           }
           return "handed_off" as const;
         },
-        Date.now() + 600,
+        leaseExpiresAtMs,
         requestDeadline,
         multipartResolutionTestScope(),
       );
@@ -520,7 +524,7 @@ test("multipart exact resolution retries transient and unknown database outcomes
           }
           return "already_pending" as const;
         },
-        Date.now() + 600,
+        leaseExpiresAtMs,
         requestDeadline,
         multipartResolutionTestScope(),
       );

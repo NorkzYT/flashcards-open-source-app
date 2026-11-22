@@ -84,7 +84,7 @@ test("rejects invalid storage configuration before HEAD", async () => {
       ),
       {
         s3Client,
-        getMediaAssetsStorageConfigFn: () => ({ bucketName: " " }),
+        getMediaAssetsStorageConfigFn: () => ({ bucketName: " ", profile: "aws" }),
       },
     ),
     {

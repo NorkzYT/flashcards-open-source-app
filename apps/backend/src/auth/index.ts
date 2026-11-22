@@ -15,6 +15,7 @@ import { SimpleFetcher, type Fetcher } from "aws-jwt-verify/https";
 import { SimpleJwksCache } from "aws-jwt-verify/jwk";
 import { authenticateAgentApiKey } from "../agent/apiKeys";
 import { getAuthConfig } from "./config";
+import { localIdTokenVerifier } from "./localIdentityVerifier";
 import { HttpError } from "../shared/errors";
 import { authenticateGuestSession } from "../guestAuth/session/index";
 import type { AnalyticsConsentChoice } from "./ensureUser";
@@ -139,7 +140,12 @@ function getVerifierConfig(): Readonly<{
   };
 }
 
-function getVerifier(): ReturnType<typeof CognitoJwtVerifier.create> {
+type IdTokenVerifier = Readonly<{
+  verify: (token: string) => Promise<VerifiedPrincipalSessionClaims & Readonly<Record<string, unknown>>>;
+}>;
+
+function getVerifier(): IdTokenVerifier {
+  if (getAuthConfig().mode === "local") return localIdTokenVerifier;
   if (verifier) return verifier;
 
   verifier = CognitoJwtVerifier.create(getVerifierConfig());
@@ -147,8 +153,9 @@ function getVerifier(): ReturnType<typeof CognitoJwtVerifier.create> {
   return verifier;
 }
 
-function getDirectRequestVerifier():
-  ReturnType<typeof CognitoJwtVerifier.create> {
+function getDirectRequestVerifier(): IdTokenVerifier {
+  // The local verifier never performs network I/O, so it needs no abort-aware fetcher.
+  if (getAuthConfig().mode === "local") return localIdTokenVerifier;
   if (directRequestVerifier) return directRequestVerifier;
 
   directRequestVerifier = CognitoJwtVerifier.create(
@@ -222,7 +229,7 @@ export function extractVerifiedIdTokenIdentity(payload: VerifiedIdTokenPayload):
 
 async function verifyIdTokenWithVerifier(
   token: string,
-  tokenVerifier: ReturnType<typeof CognitoJwtVerifier.create>,
+  tokenVerifier: IdTokenVerifier,
   checkSession: (payload: VerifiedPrincipalSessionClaims) => Promise<void>,
 ): Promise<AuthenticatedUserIdentity> {
   try {

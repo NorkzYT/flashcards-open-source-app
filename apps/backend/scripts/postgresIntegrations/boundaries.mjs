@@ -73,6 +73,22 @@ export const createdRolesByMigration = new Map([
 // migration contracts retain their original cutoffs.
 export const boundaryDefinitions = Object.freeze([
   Object.freeze({
+    migrationFileName: "0257_standalone_local_session_families.sql",
+    expectedMigrationCount: 259,
+    testFiles: Object.freeze([
+      "src/auth/standaloneLocalIdentity.postgres.integration.ts",
+    ]),
+  }),
+  Object.freeze({
+    migrationFileName: "0258_chat_run_dispatch_lease_fence.sql",
+    expectedMigrationCount: 260,
+    testFiles: Object.freeze([
+      "src/chat/runs/standaloneCredential.postgres.integration.ts",
+      "src/chat/runs/standaloneDispatchLease.postgres.integration.ts",
+      "src/chat/runs/standaloneDispatch.postgres.integration.ts",
+    ]),
+  }),
+  Object.freeze({
     migrationFileName: "0253_chat_run_guest_session.sql",
     expectedMigrationCount: 255,
     testFiles: Object.freeze([
@@ -350,5 +366,52 @@ export const boundaryDefinitions = Object.freeze([
     ]),
   }),
 ]);
+// Boundaries whose tests need a service beyond PostgreSQL. Each runs only when its opt-in variable
+// is exactly "1"; then every required variable must be set, or the run fails before any database
+// work. Unset, the standard run (including AWS release CI) is unchanged.
+export const optionalBoundaryDefinitions = Object.freeze([
+  Object.freeze({
+    optInEnvironmentVariableName: "POSTGRES_INTEGRATION_RUSTFS",
+    requiredEnvironmentVariableNames: Object.freeze([
+      "RUSTFS_IT_ENDPOINT",
+      "RUSTFS_IT_PUBLIC_ENDPOINT",
+      "RUSTFS_IT_ACCESS_KEY_ID",
+      "RUSTFS_IT_SECRET_ACCESS_KEY",
+    ]),
+    migrationFileName: "0256_multipart_completed_parts_manifests.sql",
+    expectedMigrationCount: 258,
+    testFiles: Object.freeze([
+      "src/mediaAssets/storage/multipart/rustfsMultipart.postgres.integration.ts",
+      "src/maintenance/standaloneMediaMaintenance.rustfs.postgres.integration.ts",
+    ]),
+  }),
+]);
+
+export function selectBoundaryDefinitions(environment) {
+  const selected = [...boundaryDefinitions];
+  for (const optional of optionalBoundaryDefinitions) {
+    const optIn = environment[optional.optInEnvironmentVariableName];
+    if (optIn === undefined || optIn === "") continue;
+    if (optIn !== "1") {
+      throw new Error(
+        `${optional.optInEnvironmentVariableName} must be unset or exactly "1".`,
+      );
+    }
+    const missing = optional.requiredEnvironmentVariableNames
+      .filter((name) => (environment[name] ?? "") === "");
+    if (missing.length > 0) {
+      throw new Error(
+        `${optional.optInEnvironmentVariableName}=1 requires ${missing.join(", ")}.`,
+      );
+    }
+    selected.push(Object.freeze({
+      migrationFileName: optional.migrationFileName,
+      expectedMigrationCount: optional.expectedMigrationCount,
+      testFiles: optional.testFiles,
+    }));
+  }
+  return Object.freeze(selected);
+}
+
 export const backendRolePassword =
   `postgres-integration-${randomBytes(18).toString("hex")}`;

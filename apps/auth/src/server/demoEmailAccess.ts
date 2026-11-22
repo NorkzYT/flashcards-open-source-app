@@ -1,3 +1,4 @@
+import { getIdentityProviderMode } from "./local/localIdentityConfig.js";
 import { getPlaintextSecret } from "./secrets.js";
 
 type DemoEmailAccessConfig = Readonly<{
@@ -60,6 +61,18 @@ function parseDemoEmailAllowlist(rawValue: string): ReadonlySet<string> {
  */
 export function getDemoEmailAccessConfig(): DemoEmailAccessConfig {
   if (resolvedDemoEmailAccessConfig !== undefined) {
+    return resolvedDemoEmailAccessConfig;
+  }
+
+  if (getIdentityProviderMode() === "local") {
+    // The review-account bypass signs in without OTP and is a hosted Cognito feature. Standalone has
+    // no demo mode: any configured demo input refuses startup, and the bypass is otherwise disabled.
+    const configured = ["DEMO_EMAIL_DOSTIP", "DEMO_PASSWORD_DOSTIP", "DEMO_PASSWORD_SECRET_ARN"]
+      .filter((name) => (process.env[name] ?? "").trim() !== "");
+    if (configured.length > 0) {
+      throw new Error(`${configured.join(", ")} must not be set when AUTH_IDENTITY_PROVIDER=local`);
+    }
+    resolvedDemoEmailAccessConfig = { emailAllowlist: new Set(), sharedPassword: null, passwordSecretArn: null };
     return resolvedDemoEmailAccessConfig;
   }
 

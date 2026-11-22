@@ -1,4 +1,6 @@
 import { createBrowserGuestChatOperation, reserveNewBrowserGuestTrialOperation, resolveFundedBrowserGuestTrial } from "../../aiUsage/browserGuestTrial/admission";
+import { assertStandaloneChatTurnAdmissible, isStandaloneChatDeployment } from "../deployment";
+import { sealStandaloneCredential, type StandaloneCredentialBinding } from "../runs/standaloneCredential";
 import type { Handler } from "hono";
 import { assertGuestRequestSupportsProduct } from "../../guestAuth/webPlatform";
 import { assertAiConsentReceiptActive } from "../../aiConsent";
@@ -214,6 +216,14 @@ export function createPostChatHandler(dependencies: ChatRouteDependencies): Hand
       dependencies,
     );
     const userOpenAIApiKey = readUserOpenAIApiKeyHeader(context.req.raw);
+    const standaloneCredentialKeyring = dependencies.standaloneCredentialKeyring ?? null;
+    assertStandaloneChatTurnAdmissible(userOpenAIApiKey !== null, standaloneCredentialKeyring !== null);
+    // Standalone persists the key only as ciphertext bound to the new run (`prepareChatRun`).
+    const sealStandaloneUserCredential = userOpenAIApiKey !== null && standaloneCredentialKeyring !== null
+      && isStandaloneChatDeployment()
+      ? (binding: StandaloneCredentialBinding) =>
+        sealStandaloneCredential(standaloneCredentialKeyring, binding, userOpenAIApiKey, new Date())
+      : undefined;
     assertGuestRequestSupportsProduct(requestContext);
     const browserGuestTrial = resolveFundedBrowserGuestTrial(requestContext, userOpenAIApiKey !== null);
     const aiConsentId = readAiConsentIdHeader(context.req.raw);
@@ -289,6 +299,7 @@ export function createPostChatHandler(dependencies: ChatRouteDependencies): Hand
         aiConsentId,
         browserGuestTrial,
         readChatGuestCredential(requestContext),
+        sealStandaloneUserCredential,
       ));
     } catch (error) {
       // Recorded here, outside the run transaction, and before the refusal reaches the client unchanged.

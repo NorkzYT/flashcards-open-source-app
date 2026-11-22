@@ -1,0 +1,16 @@
+# Created once by `selfhost-setup` in the deployment root; it is never overwritten, and you may edit
+# or delete it. It forwards only the self-hosting commands, for this one instance, to the checkout:
+#   make            (help)
+#   make selfhost-check | selfhost-up | selfhost-status | selfhost-logs [SERVICES='auth backend'] [FOLLOW=1]
+SELFHOST_MAKEFILE := @SOURCE_MAKEFILE@
+SELFHOST_INSTANCE := @INSTANCE@
+SELFHOST_GOALS := selfhost-help selfhost-setup selfhost-check selfhost-up selfhost-status selfhost-logs
+.DEFAULT_GOAL := selfhost-help
+.PHONY: $(SELFHOST_GOALS)
+
+ifeq ($(origin INSTANCE),command line)
+$(error this Makefile serves only $(SELFHOST_INSTANCE); for another instance use make -f $(SELFHOST_MAKEFILE) <target> INSTANCE=<dir>)
+endif
+
+$(SELFHOST_GOALS):
+	@$(MAKE) --no-print-directory -f $(SELFHOST_MAKEFILE) $@ INSTANCE=$(SELFHOST_INSTANCE)

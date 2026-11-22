@@ -307,6 +307,15 @@ async function deleteExistingObject(
     return "deleted";
   } catch (error) {
     if (isMissingObjectError(error)) return "not_found";
+    if (
+      isConditionalDeleteConflict(error)
+      && getS3ErrorStatusCode(error) === 412
+      && dependencies.getMediaAssetsStorageConfigFn().profile === "rustfs"
+      && await loadObjectETag(input, bucketName, dependencies) === null
+    ) {
+      // RustFS 1.0.6 answers `If-Match` on a missing key with 412, not 404.
+      return "not_found";
+    }
     if (isConditionalDeleteConflict(error)) {
       throw new MediaBlobCleanupStorageConditionalConflictError(
         getS3ErrorStatusCode(error) ?? 412,

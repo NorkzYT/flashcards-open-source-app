@@ -1,3 +1,16 @@
+import { getIdentityProviderMode } from "./local/localIdentityConfig.js";
+
+/**
+ * Standalone (AUTH_IDENTITY_PROVIDER=local) never derives a public URL from the request's Host:
+ * the issuer, API and MCP resource are explicit settings, so a forged Host cannot mint or advertise
+ * identifiers for another origin.
+ */
+function requireConfiguredInStandalone(name: string): void {
+  if (getIdentityProviderMode() === "local") {
+    throw new Error(`${name} is required when AUTH_IDENTITY_PROVIDER=local`);
+  }
+}
+
 function stripTrailingSlash(value: string): string {
   return value.endsWith("/") ? value.slice(0, -1) : value;
 }
@@ -17,6 +30,7 @@ export function getPublicAuthBaseUrl(requestUrl: string): string {
     return stripTrailingSlash(configuredValue);
   }
 
+  requireConfiguredInStandalone("PUBLIC_AUTH_BASE_URL");
   return stripTrailingSlash(toRequestOrigin(requestUrl));
 }
 
@@ -30,6 +44,7 @@ export function getPublicApiBaseUrl(requestUrl: string): string {
     return stripTrailingSlash(configuredValue);
   }
 
+  requireConfiguredInStandalone("PUBLIC_API_BASE_URL");
   const requestOrigin = toRequestOrigin(requestUrl);
   const host = new URL(requestUrl).host;
   if (host === "localhost:8081" || host === "127.0.0.1:8081") {
@@ -53,6 +68,7 @@ export function getMcpResource(requestUrl: string): string {
     return stripTrailingSlash(configuredValue);
   }
 
+  requireConfiguredInStandalone("MCP_RESOURCE");
   const authBaseUrl = getPublicAuthBaseUrl(requestUrl);
   const url = new URL(authBaseUrl);
   url.hostname = url.hostname.startsWith("auth.")

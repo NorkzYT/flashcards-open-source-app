@@ -115,6 +115,43 @@ export function validatePublicUrlConfiguration(): void {
   if (publicSiteBaseUrl !== undefined && publicSiteBaseUrl !== "") {
     parsePublicOrigin(publicSiteBaseUrl, "PUBLIC_SITE_BASE_URL");
   }
+
+  if (process.env.AUTH_MODE === "local") {
+    validateStandalonePublicUrlConfiguration();
+  }
+}
+
+function requireStandaloneHttpsOrigin(variableName: string, path: string): string {
+  const value = process.env[variableName];
+  if (value === undefined || value === "") {
+    throw new Error(`${variableName} is required in standalone mode (AUTH_MODE=local)`);
+  }
+  if (value.endsWith(path) === false) {
+    throw new Error(`${variableName} must be an https origin followed by "${path}" in standalone mode`);
+  }
+  const origin = parsePublicOrigin(path === "" ? value : value.slice(0, -path.length), variableName);
+  if (origin.startsWith("https://") === false) {
+    throw new Error(`${variableName} must be https in standalone mode`);
+  }
+  return origin;
+}
+
+/**
+ * Standalone (AUTH_MODE=local) serves agent discovery, legal links and MCP metadata without any
+ * Host-derived fallback: every public URL the API or MCP process can hand to a client is configured,
+ * so a forged Host never changes where a client is sent and nothing defaults to the hosted service.
+ * Returns the configured origins for callers that pin more (the MCP process checks its own host).
+ */
+export function validateStandalonePublicUrlConfiguration(): Readonly<{
+  app: string; api: string; auth: string; mcp: string; site: string;
+}> {
+  return {
+    app: requireStandaloneHttpsOrigin("PUBLIC_APP_BASE_URL", ""),
+    api: requireStandaloneHttpsOrigin("PUBLIC_API_BASE_URL", "/v1"),
+    auth: requireStandaloneHttpsOrigin("PUBLIC_AUTH_BASE_URL", ""),
+    mcp: requireStandaloneHttpsOrigin("PUBLIC_MCP_BASE_URL", ""),
+    site: requireStandaloneHttpsOrigin("PUBLIC_SITE_BASE_URL", ""),
+  };
 }
 
 /** The marketing-site origin, empty when no site is configured for this deployment. */

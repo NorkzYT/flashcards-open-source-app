@@ -42,6 +42,7 @@ export {
   claimChatRun,
   completeClaimedChatRun,
   failQueuedChatRun,
+  interruptAbandonedStandaloneChatRun,
   interruptPreparedChatRun,
   markQueuedChatRunDispatchFailed,
   persistClaimedChatRunCancelled,
@@ -51,3 +52,16 @@ export {
   requestChatRunCancellation,
   touchClaimedChatRunHeartbeat,
 } from "./runs/lifecycleService";
+export type { ChatRunClaimMode } from "./runs/lifecycleService";
+
+export {
+  completeStandaloneChatRunDispatch,
+  leaseStandaloneChatRunDispatches,
+  recoverStandaloneChatRunDispatches,
+} from "./runs/standaloneDispatch";
+export type {
+  LeasedChatRunDispatch,
+  RecoveredChatRunDispatch,
+  RecoveredChatRunDispatchOutcome,
+  StandaloneChatRunDispatchLease,
+} from "./runs/standaloneDispatch";

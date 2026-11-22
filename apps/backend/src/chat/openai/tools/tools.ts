@@ -56,6 +56,7 @@ import { executeBashToolCall } from "./bashTool";
 import { BASH_TOOL_NAME, OPENAI_BASH_TOOL } from "./bashToolContract";
 import { executeViewFileToolCall } from "./viewFileTool";
 import { OPENAI_VIEW_FILE_TOOL, VIEW_FILE_TOOL_NAME } from "./viewFileToolContract";
+import { isChatSandboxAvailable, STANDALONE_SANDBOX_UNAVAILABLE_MESSAGE } from "../../deployment";
 import {
   loadAiUsageStatus,
   resolveAiUsageTierForFacts,
@@ -503,10 +504,13 @@ const DEFAULT_OPENAI_TOOL_DEPENDENCIES: OpenAIToolDependencies = {
 
 export function buildOpenAIChatTools(
   generatedImageEligible: boolean,
+  sandboxAvailable: boolean = isChatSandboxAvailable(),
 ): ReadonlyArray<OpenAI.Responses.FunctionTool> {
+  // Without the isolated sandbox (standalone mode) the model is never offered code execution.
+  const fileTools = sandboxAvailable ? [OPENAI_BASH_TOOL, OPENAI_VIEW_FILE_TOOL] : [OPENAI_VIEW_FILE_TOOL];
   return generatedImageEligible
-    ? [...OPENAI_CHAT_TOOLS, OPENAI_BASH_TOOL, OPENAI_VIEW_FILE_TOOL, OPENAI_GENERATED_IMAGE_TOOL]
-    : [...OPENAI_CHAT_TOOLS, OPENAI_BASH_TOOL, OPENAI_VIEW_FILE_TOOL];
+    ? [...OPENAI_CHAT_TOOLS, ...fileTools, OPENAI_GENERATED_IMAGE_TOOL]
+    : [...OPENAI_CHAT_TOOLS, ...fileTools];
 }
 
 /**
@@ -934,6 +938,21 @@ export async function executeChatToolCallWithDependencies(
   }
 
   if (toolName === BASH_TOOL_NAME) {
+    if (!isChatSandboxAvailable()) {
+      return {
+        output: createToolErrorResult(BASH_TOOL_NAME, {
+          error: { name: "SandboxUnavailable", message: `${STANDALONE_SANDBOX_UNAVAILABLE_MESSAGE}.` },
+          code: "SANDBOX_UNAVAILABLE",
+        }),
+        isMutating: false,
+        succeeded: false,
+        shouldInvalidateMainContent: false,
+        stopReason: null,
+        sqlTelemetry: null,
+        toolErrorClass: "SandboxUnavailable",
+        modelContent: null,
+      };
+    }
     return executeBashToolCall(rawArguments, context);
   }
 

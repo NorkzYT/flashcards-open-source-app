@@ -50,6 +50,7 @@ export const testObservationScope: BackendObservationScope = createBackendObserv
 export function getTestMediaAssetsStorageConfig(): MediaAssetsStorageConfig {
   return {
     bucketName: "test-media-assets-bucket",
+    profile: "aws",
   };
 }
 

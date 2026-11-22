@@ -1,0 +1,22 @@
+# Builds the web app once (it derives api./auth. from its own app. host at runtime) and serves it
+# from a pinned Caddy that also routes the api. and auth. hosts.
+FROM node:24.22.3-alpine AS web
+# The web app imports shared scheduling and pricing modules from apps/backend/src, whose type
+# imports resolve against the backend's own dependencies.
+WORKDIR /src/apps/backend
+COPY apps/backend/package.json apps/backend/package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY apps/backend/tsconfig.json ./
+COPY apps/backend/src/ src/
+WORKDIR /src/apps/web
+COPY apps/web/package.json apps/web/package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY apps/web/ ./
+RUN npm run build
+
+FROM caddy:2.10.2-alpine
+COPY infra/selfhost/Caddyfile /etc/caddy/Caddyfile
+COPY --from=web /src/apps/web/dist /srv/web
+RUN mkdir -p /data /config && chown -R 1001:1001 /data /config
+USER 1001:1001
+EXPOSE 8080

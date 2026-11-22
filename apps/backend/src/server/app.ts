@@ -1,4 +1,11 @@
 import { cors } from "hono/cors";
+import { runLiveStream } from "../chat/live";
+import { handleLiveRequest } from "../chat/live/request";
+import {
+  createStandaloneChatLiveRoutes,
+  loadStandaloneChatLiveConfig,
+  type StandaloneChatLiveConfig,
+} from "../chat/live/standalone";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -12,6 +19,7 @@ import {
 } from "../agent/envelope";
 import { createAgentRemediationInstructions } from "../aiTools/toolContract/remediationInstructions";
 import { getAuthConfig } from "../auth/config";
+import { assertLocalIdTokenVerifierConfigured } from "../auth/localIdentityVerifier";
 import {
   createPublicHttpErrorDetails,
   createPublicHttpErrorMessage,
@@ -263,6 +271,7 @@ function createMountedApp(
   basePath: string,
   allowedOrigins: Array<string>,
   browserGuestSessionCreationPath: string,
+  standaloneChatLive: StandaloneChatLiveConfig | null,
 ): Hono<AppEnv> {
   const app = new Hono<AppEnv>({ strict: false }).basePath(basePath);
   const anonymousAnalyticsAllowedOrigins = [
@@ -590,6 +599,12 @@ function createMountedApp(
   app.route("/", createChatTranscriptionsRoutes({ allowedOrigins }));
   app.route("/", createChatRoutes({ allowedOrigins }));
   app.route("/", createSyncRoutes({ allowedOrigins }));
+  if (standaloneChatLive !== null) {
+    app.route("/", createStandaloneChatLiveRoutes({
+      handleLiveRequestFn: handleLiveRequest,
+      runLiveStreamFn: runLiveStream,
+    }));
+  }
 
   return app;
 }
@@ -599,18 +614,19 @@ function createMountedApp(
  * startup and Lambda cold start both fail closed before serving requests.
  */
 export function createApp(basePath: string): Hono<AppEnv> {
-  getAuthConfig();
+  if (getAuthConfig().mode === "local") assertLocalIdTokenVerifierConfigured();
   validatePublicUrlConfiguration();
   const allowedOrigins = getAllowedOrigins();
+  const standaloneChatLive = loadStandaloneChatLiveConfig(process.env);
   const browserGuestSessionCreationPath = `${basePath}/guest-auth/browser/session`;
   const routeMountPaths = getRouteMountPaths(basePath);
   if (routeMountPaths.length === 1) {
-    return createMountedApp(routeMountPaths[0], allowedOrigins, browserGuestSessionCreationPath);
+    return createMountedApp(routeMountPaths[0], allowedOrigins, browserGuestSessionCreationPath, standaloneChatLive);
   }
 
   const app = new Hono<AppEnv>({ strict: false });
   for (const routeMountPath of routeMountPaths) {
-    app.route("/", createMountedApp(routeMountPath, allowedOrigins, browserGuestSessionCreationPath));
+    app.route("/", createMountedApp(routeMountPath, allowedOrigins, browserGuestSessionCreationPath, standaloneChatLive));
   }
 
   return app;

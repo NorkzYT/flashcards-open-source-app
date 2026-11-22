@@ -19,7 +19,22 @@ if [[ -z "${MIGRATION_DATABASE_URL:-}" && -z "${PGHOST:-}" ]]; then
   exit 1
 fi
 
-run_psql -q <<'SQL'
+# 1 makes a set *_DB_PASSWORD whose role does not exist an error instead of a skip.
+REQUIRE_RUNTIME_ROLES="${MIGRATE_REQUIRE_RUNTIME_ROLES:-0}"
+if [[ "$REQUIRE_RUNTIME_ROLES" != "0" && "$REQUIRE_RUNTIME_ROLES" != "1" ]]; then
+  echo "ERROR: MIGRATE_REQUIRE_RUNTIME_ROLES must be 0 or 1" >&2
+  exit 1
+fi
+
+# Runs the SQL on stdin as one transaction that stops at the first error, after taking a
+# transaction-scoped advisory lock that every step of this script shares: concurrent runs against
+# one database execute their steps one at a time, and a killed client's lock ends with its session.
+run_locked_psql() {
+  { echo "SELECT pg_advisory_xact_lock(7400271203853146) AS migrate_lock \\gset"; cat; } \
+    | run_psql --single-transaction -v ON_ERROR_STOP=1 "$@" -f -
+}
+
+run_locked_psql -q <<'SQL'
 CREATE TABLE IF NOT EXISTS schema_migrations (
   filename TEXT PRIMARY KEY,
   applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -29,7 +44,7 @@ SQL
 echo "Running migrations..."
 for f in "$ROOT_DIR"/db/migrations/*.sql; do
   BASENAME=$(basename "$f")
-  ALREADY=$(echo "SELECT 1 FROM schema_migrations WHERE filename = :'fname'" | run_psql -v "fname=$BASENAME" -tA)
+  ALREADY=$(echo "SELECT 1 FROM schema_migrations WHERE filename = :'fname'" | run_psql -v ON_ERROR_STOP=1 -v "fname=$BASENAME" -tA)
   if [[ "$ALREADY" == "1" ]]; then
     echo "  Skipping $BASENAME (already applied)"
     continue
@@ -44,41 +59,72 @@ for f in "$ROOT_DIR"/db/migrations/*.sql; do
   # be checked once at commit instead of per statement. Without this flag,
   # psql autocommits each statement individually and both patterns break on
   # a from-scratch migrate run.
-  run_psql --single-transaction -v ON_ERROR_STOP=1 -f "$f"
-  echo "INSERT INTO schema_migrations (filename) VALUES (:'fname')" | run_psql -v "fname=$BASENAME"
+  # The file and its schema_migrations row commit together, so an interrupted run leaves neither;
+  # the re-check under the lock skips a file that a concurrent run applied after the check above.
+  # \i resolves the bare file name against the subshell's directory: an interpolated path would not
+  # survive whitespace.
+  (cd "$(dirname "$f")" && run_locked_psql -v "fname=$BASENAME" <<'SQL'
+SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE filename = :'fname') AS already_applied \gset
+\if :already_applied
+\echo '  Skipping' :'fname' '(applied by a concurrent run)'
+\else
+\i :fname
+INSERT INTO schema_migrations (filename) VALUES (:'fname');
+\endif
+SQL
+  )
 done
 
 echo "Applying views..."
 for f in "$ROOT_DIR"/db/views/*.sql; do
   echo "  Applying $(basename "$f")"
-  run_psql -v ON_ERROR_STOP=1 -f "$f"
+  (cd "$(dirname "$f")" && run_locked_psql -v "fname=$(basename "$f")" <<'SQL'
+\i :fname
+SQL
+  )
 done
 
-if [[ -n "${BACKEND_DB_PASSWORD:-}" ]]; then
-  run_psql -v "role_name=backend_app" -v "role_pass=$BACKEND_DB_PASSWORD" <<'SQL'
-SELECT format('ALTER ROLE %I WITH PASSWORD %L', :'role_name', :'role_pass')
-WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'role_name')
-\gexec
+# The password reaches psql only through MIGRATE_ROLE_PASSWORD in that call's environment and is read
+# with \getenv (psql 15+; an older psql rejects the command and the step fails), so it is not in any
+# process's command line. :'role_pass' and %L quote it as a literal.
+configure_role_password() {
+  MIGRATE_ROLE_PASSWORD="$2" run_locked_psql -v "role_name=$1" -v "role_required=$REQUIRE_RUNTIME_ROLES" <<'SQL'
+\getenv role_pass MIGRATE_ROLE_PASSWORD
+\if :{?role_pass}
+\else
+DO $$
+BEGIN
+  RAISE EXCEPTION 'runtime role password was not passed to psql';
+END
+$$;
+\endif
+SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'role_name') AS role_exists \gset
+\if :role_exists
+SELECT format('ALTER ROLE %I WITH PASSWORD %L', :'role_name', :'role_pass') \gexec
+\elif :role_required
+SELECT set_config('migrate.missing_role', :'role_name', true) AS missing_role \gset
+DO $$
+BEGIN
+  RAISE EXCEPTION 'runtime role % does not exist', current_setting('migrate.missing_role');
+END
+$$;
+\endif
 SQL
+}
+
+if [[ -n "${BACKEND_DB_PASSWORD:-}" ]]; then
+  configure_role_password backend_app "$BACKEND_DB_PASSWORD"
 fi
 
 if [[ -n "${AUTH_DB_PASSWORD:-}" ]]; then
-  run_psql -v "role_name=auth_app" -v "role_pass=$AUTH_DB_PASSWORD" <<'SQL'
-SELECT format('ALTER ROLE %I WITH PASSWORD %L', :'role_name', :'role_pass')
-WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'role_name')
-\gexec
-SQL
+  configure_role_password auth_app "$AUTH_DB_PASSWORD"
 fi
 
 if [[ -n "${REPORTING_DB_PASSWORD:-}" ]]; then
-  run_psql -v "role_name=reporting_readonly" -v "role_pass=$REPORTING_DB_PASSWORD" <<'SQL'
-SELECT format('ALTER ROLE %I WITH PASSWORD %L', :'role_name', :'role_pass')
-WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'role_name')
-\gexec
-SQL
+  configure_role_password reporting_readonly "$REPORTING_DB_PASSWORD"
 fi
 
-run_psql --single-transaction -v "admin_emails=${ADMIN_EMAILS:-}" <<'SQL'
+run_locked_psql -v "admin_emails=${ADMIN_EMAILS:-}" <<'SQL'
 CREATE TEMP TABLE desired_bootstrap_admins (
   email TEXT PRIMARY KEY
 ) ON COMMIT DROP;

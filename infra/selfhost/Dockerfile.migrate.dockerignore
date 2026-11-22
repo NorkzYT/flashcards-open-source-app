@@ -1,0 +1,5 @@
+# Repository-root build context, limited to the migration driver and SQL.
+*
+!scripts/deploy/migrate.sh
+!db/
+!infra/selfhost/migrate-entrypoint.sh

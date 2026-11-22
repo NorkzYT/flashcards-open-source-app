@@ -1,3 +1,4 @@
+import type { UserOpenAIApiKey } from "../userOpenAIApiKey";
 import type { ServerChatMessage } from "../openai/replayItems";
 import type { ChatComposerSuggestionsLocale } from "../composerSuggestions";
 import type {
@@ -67,6 +68,8 @@ export type ChatRunDiagnostics = Readonly<{
 }>;
 
 export type ClaimedChatRun = Readonly<{
+  /** Standalone only: the person's own key, opened in the claim transaction under the exact lease. */
+  userOpenAIApiKey?: UserOpenAIApiKey | null;
   browserGuestAiTrial?: boolean;
   aiConsentId?: string | null;
   initiatingGuestSessionId: string | null;

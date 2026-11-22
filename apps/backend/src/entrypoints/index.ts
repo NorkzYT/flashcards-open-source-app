@@ -1,9 +1,15 @@
 import { serve } from "@hono/node-server";
 import { createApp } from "../server/app";
 import { initializeBackendSentry } from "../observability/sentry";
+import { closeStandaloneChatLiveStreams } from "../chat/live/standalone";
+import { isStandaloneDeployment, loadStandaloneBackendCsrfSecret } from "../auth/csrfSecret";
 
 async function main(): Promise<void> {
   initializeBackendSentry("backend-api");
+  // Fail closed before listening: browser session writes need this key on every request.
+  if (isStandaloneDeployment()) {
+    loadStandaloneBackendCsrfSecret();
+  }
   const app = createApp("/v1");
   const port = Number.parseInt(process.env.PORT ?? "8080", 10);
   // Unset binds every interface, which the compose auth container needs to reach this backend
@@ -11,7 +17,7 @@ async function main(): Promise<void> {
   // trusts the client-supplied Host header, so only a loopback bind keeps the network out.
   const hostname = process.env.BACKEND_BIND_HOST;
 
-  serve({ fetch: app.fetch, port, hostname }, (info) => {
+  const server = serve({ fetch: app.fetch, port, hostname }, (info) => {
     // Handed to `console` as an object rather than pre-serialized, for the same reason
     // `writeCloudWatchRecord` is (apps/backend/src/observability/cloudWatch.ts): a pre-serialized
     // record leaves `message` a string under the Lambda JSON log format, with nothing inside it
@@ -19,6 +25,13 @@ async function main(): Promise<void> {
     // read by a metric filter, but they are backend records, and one rule with no exceptions is what
     // keeps the rule checkable.
     console.log({ domain: "backend", action: "start", port: info.port });
+  });
+  // Containers stop with SIGTERM: stop accepting connections and let in-flight requests finish.
+  process.once("SIGTERM", () => {
+    console.log({ domain: "backend", action: "shutdown" });
+    server.close(() => process.exit(0));
+    // Open live SSE streams would otherwise hold close() for up to their 9-minute limit.
+    closeStandaloneChatLiveStreams();
   });
 }
 

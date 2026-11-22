@@ -33,7 +33,13 @@ import {
   renameChatSession,
   rolloverToFreshChatSession,
 } from "../store";
-import { invokeChatWorkerOrPersistFailure } from "../worker/invoke";
+import { dispatchStandaloneChatWorker, invokeChatWorkerOrPersistFailure } from "../worker/invoke";
+import { assertStandaloneAiFundingConfigured, isStandaloneChatDeployment } from "../deployment";
+import { readStandaloneCredentialKeyring, type StandaloneCredentialKeyring } from "../runs/standaloneCredential";
+import {
+  assertStandaloneAiUsageAllowanceNotReached,
+  resolveStandaloneAiUsageAllowance,
+} from "../standaloneAllowance";
 
 export type ChatRoutesOptions = Readonly<{
   allowedOrigins: ReadonlyArray<string>;
@@ -71,6 +77,8 @@ export type ChatRouteDependencies = Readonly<{
   createFreshChatSessionFn: typeof createFreshChatSession;
   getChatSessionIdFn: typeof getChatSessionId;
   prepareChatRunFn: typeof prepareChatRun;
+  /** Standalone personal-key sealing; absent or null = personal keys refused in standalone. */
+  standaloneCredentialKeyring?: StandaloneCredentialKeyring | null;
   recordAiMessageSentAnalyticsFn: typeof recordAiMessageSentAnalytics;
   recordAiLimitReachedAnalyticsFn: typeof recordAiLimitReachedAnalytics;
   interruptPreparedChatRunFn: typeof interruptPreparedChatRun;
@@ -128,8 +136,16 @@ export function createChatRouteDependencies(options: ChatRoutesOptions): ChatRou
         return requestContext.selectedWorkspaceId;
       });
 
+  // Resolved once at startup, so an invalid NIBOMO_DEPLOYMENT stops the API instead of a chat turn.
+  const standalone = isStandaloneChatDeployment();
+  // Read once: a set but unreadable/short key file or missing NIBOMO_INSTANCE_ID stops the API here.
+  const standaloneCredentialKeyring = standalone ? readStandaloneCredentialKeyring() : null;
+  // `user-key` funding without sealing, or with an operator key beside it, stops the API here too.
+  if (standalone) assertStandaloneAiFundingConfigured(standaloneCredentialKeyring !== null);
+
   return {
     allowedOrigins: options.allowedOrigins,
+    standaloneCredentialKeyring,
     loadRequestContextFromRequestFn,
     getRecoveredChatSessionFn: options.getRecoveredChatSessionFn ?? getRecoveredChatSession,
     getRecoveredChatSessionSnapshotFn: options.getRecoveredChatSessionSnapshotFn ?? getRecoveredChatSessionSnapshot,
@@ -141,7 +157,8 @@ export function createChatRouteDependencies(options: ChatRoutesOptions): ChatRou
     recordAiMessageSentAnalyticsFn: options.recordAiMessageSentAnalyticsFn ?? recordAiMessageSentAnalytics,
     recordAiLimitReachedAnalyticsFn: options.recordAiLimitReachedAnalyticsFn ?? recordAiLimitReachedAnalytics,
     interruptPreparedChatRunFn: options.interruptPreparedChatRunFn ?? interruptPreparedChatRun,
-    invokeChatWorkerFn: options.invokeChatWorkerFn ?? invokeChatWorkerOrPersistFailure,
+    invokeChatWorkerFn: options.invokeChatWorkerFn
+      ?? (standalone ? dispatchStandaloneChatWorker : invokeChatWorkerOrPersistFailure),
     requestChatRunCancellationFn: options.requestChatRunCancellationFn ?? requestChatRunCancellation,
     createChatLiveStreamEnvelopeFn: options.createChatLiveStreamEnvelopeFn ?? createChatLiveStreamEnvelope,
     listChatSessionHistoryFn: options.listChatSessionHistoryFn ?? listChatSessionHistory,
@@ -149,9 +166,9 @@ export function createChatRouteDependencies(options: ChatRoutesOptions): ChatRou
     archiveChatSessionFn: options.archiveChatSessionFn ?? archiveChatSession,
     resolveAccessibleChatWorkspaceIdFn,
     resolveAiUsageAllowanceForEnforcementFn: options.resolveAiUsageAllowanceForEnforcementFn
-      ?? resolveAiUsageAllowanceForEnforcement,
+      ?? (standalone ? resolveStandaloneAiUsageAllowance : resolveAiUsageAllowanceForEnforcement),
     assertAiUsageAllowanceNotReachedFn: options.assertAiUsageAllowanceNotReachedFn
-      ?? assertAiUsageAllowanceNotReached,
+      ?? (standalone ? assertStandaloneAiUsageAllowanceNotReached : assertAiUsageAllowanceNotReached),
     reportHeavyAiUsageWeightedTokensFn: options.reportHeavyAiUsageWeightedTokensFn
       ?? reportHeavyAiUsageWeightedTokens,
     createChatFileUploadFn: options.createChatFileUploadFn ?? createChatFileUpload,

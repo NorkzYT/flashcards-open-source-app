@@ -1,0 +1,29 @@
+# AI overlay for NIBOMO_AI_PROVIDER=user-key: AI chat runs only on each person's own OpenAI key, with no
+# operator key anywhere (the openai_api_key secret is not mounted, so nothing can fall back to it). The API
+# seals each personal key with secrets/chat_credential_key bound to NIBOMO_INSTANCE_ID; the worker opens it
+# once at claim. Keyless turns are refused (400 OPENAI_API_KEY_REQUIRED_STANDALONE) before anything is
+# written, and a keyless or credential-less run reaching the worker ends interrupted without a provider call.
+# Use instead of compose.ai.yml, together with `--profile ai`; both services refuse to start if the key file
+# or instance id is missing. Outbound HTTPS (egress) is the provider route for chat and transcription.
+x-user-key-ai: &user-key-ai
+  NIBOMO_STANDALONE_AI_FUNDING: user-key
+  NIBOMO_CHAT_CREDENTIAL_KEY_FILE: /run/secrets/chat_credential_key
+  NIBOMO_INSTANCE_ID: ${NIBOMO_INSTANCE_ID:?NIBOMO_AI_PROVIDER=user-key needs NIBOMO_INSTANCE_ID (setup.sh generates it)}
+
+services:
+  backend:
+    environment:
+      <<: *user-key-ai
+    secrets:
+      - chat_credential_key
+    networks: [egress]
+  worker:
+    environment:
+      <<: *user-key-ai
+    secrets:
+      - chat_credential_key
+    networks: [egress]
+
+secrets:
+  chat_credential_key:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/chat_credential_key

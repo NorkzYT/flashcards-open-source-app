@@ -11,7 +11,11 @@ import { addBackendBreadcrumb, type BackendObservationScope } from "../../../obs
 import { MediaBlobWriterFenceError } from "../../blobLifecycle";
 import { imageJpegCardMediaBlobMimeType, type MediaAssetObjectMetadata } from "../../types";
 import { buildMediaBlobStorageKey, buildMediaUploadStagingStorageKey } from "../../storageKeys";
-import { getMediaAssetsS3Client, getMediaAssetsStorageConfig } from "../config";
+import {
+  createMediaAssetsS3Client,
+  getMediaAssetsS3Client,
+  getMediaAssetsStorageConfig,
+} from "../config";
 import type { MediaAssetStorageDependencies } from "../contracts";
 import { getS3ErrorStatusCode } from "../errors";
 import {
@@ -464,7 +468,7 @@ export function getGeneratedMediaPromotionS3Client(): S3Client {
   if (generatedMediaPromotionS3Client !== undefined) {
     return generatedMediaPromotionS3Client;
   }
-  generatedMediaPromotionS3Client = new S3Client({ maxAttempts: 1 });
+  generatedMediaPromotionS3Client = createMediaAssetsS3Client("private", { maxAttempts: 1 });
   return generatedMediaPromotionS3Client;
 }
 export async function loadGeneratedMediaStagingObject(

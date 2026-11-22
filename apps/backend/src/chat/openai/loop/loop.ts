@@ -23,6 +23,7 @@ import {
   type StoredOpenAIReplayItem,
 } from "../replayItems";
 import { buildOpenAIChatTools } from "../tools/tools";
+import { prepareChatFileDerivativesForDeployment } from "./standaloneDerivatives";
 import { resolveChatClientApp, type ChatClientApp } from "../../shared";
 import type { ContentPart } from "../../types";
 import {
@@ -136,7 +137,7 @@ export type StartOpenAILoopParams = Readonly<{
 }>;
 
 const DEFAULT_OPENAI_LOOP_DEPENDENCIES: OpenAILoopDependencies = {
-  prepareChatFileDerivatives,
+  prepareChatFileDerivatives: prepareChatFileDerivativesForDeployment(prepareChatFileDerivatives),
   buildChatCompletionInput,
   buildChatCompletionInputWithBudget,
   getOpenAIClient,

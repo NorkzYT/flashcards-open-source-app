@@ -1,0 +1,12 @@
+# Repository-root build context, limited to what the gateway image reads.
+*
+!apps/web/
+!apps/backend/package.json
+!apps/backend/package-lock.json
+!apps/backend/tsconfig.json
+!apps/backend/src/
+!infra/selfhost/Caddyfile
+**/node_modules
+**/dist
+apps/web/test-results
+apps/web/playwright-report

@@ -8,6 +8,7 @@ import type { CreatedMultipartMediaAssetUpload } from "../../types";
 import { MediaBlobWriterFenceError } from "../../blobLifecycle";
 import { HttpError } from "../../../shared/errors";
 import {
+  assertMultipartCompletionSupportedByStorageProfile,
   createExpiresAt,
   multipartUploadExpiresSeconds,
 } from "../config";
@@ -29,6 +30,7 @@ import {
 } from "../errors";
 import { loadMediaAssetObjectMetadataWithAbortSignalAndDependencies } from "../objects";
 import {
+  assertMediaAssetObjectContentHashMatches,
   assertMediaAssetObjectMetadataMatches,
   assertMediaAssetObjectShapeAndProofMatches,
   createUploadProofMetadata,
@@ -44,6 +46,12 @@ import {
   type MultipartMediaBlobStorageCapability,
   type MultipartMediaBlobWriterAttemptExactInput,
 } from "../../uploadSessions";
+import {
+  createCompletedPartsManifest,
+  digestCompletedPartsManifest,
+  type CompletedPartsManifestStore,
+} from "./completedPartsManifest";
+import { readMultipartObjectContentUnderETag } from "./rustfsMultipartContent";
 
 type MultipartMediaBlobStorageCapabilityVerifier = (
   capability: MultipartMediaBlobStorageCapability,
@@ -88,7 +96,7 @@ async function normalizeMultipartStagingObjectWithDependencies(
   stagingObjectInput: AssertMediaAssetObjectInput,
   dependencies: MediaAssetStorageDependencies,
   verifyCapability: MultipartMediaBlobStorageCapabilityVerifier,
-): Promise<void> {
+): Promise<null> {
   const config = dependencies.getMediaAssetsStorageConfigFn();
   const context: MediaAssetStorageContext = {
     workspaceId: input.workspaceId,
@@ -157,6 +165,7 @@ async function normalizeMultipartStagingObjectWithDependencies(
       stagingObjectInput,
       normalizedMetadata,
     );
+    return null;
   } catch (error) {
     rethrowMediaAssetStorageAbortReason(input.signal);
     if (
@@ -167,6 +176,104 @@ async function normalizeMultipartStagingObjectWithDependencies(
     }
     throw createMediaAssetStorageError(context, "copy_object", error);
   }
+}
+
+/**
+ * Persists the canonical parts list whose SHA-256 is the writer's immutable
+ * fingerprint before CompleteMultipartUpload, so durable reconciliation can
+ * recover the part checksums that RustFS ListParts omits.
+ */
+async function recordCompletedPartsManifest(
+  input: CompleteMultipartMediaAssetUploadInput,
+  store: CompletedPartsManifestStore,
+): Promise<void> {
+  const manifest = createCompletedPartsManifest(input.parts);
+  if (
+    input.parts.length !== input.writer.partCount
+    || digestCompletedPartsManifest(manifest)
+      !== input.writer.completedPartsFingerprint
+  ) {
+    throw new MediaBlobWriterFenceError(
+      "verify_multipart_storage_input",
+    );
+  }
+  input.signal.throwIfAborted();
+  await store.record(
+    input.writer.completedPartsFingerprint,
+    input.writer.partCount,
+    manifest,
+  );
+  input.signal.throwIfAborted();
+}
+
+/**
+ * RustFS replacement for the normalizing self-copy: the completed object must
+ * match its shape and ownership proof on HEAD, and then every byte of that same
+ * entity (GET `If-Match` the HEAD ETag) must hash to the session SHA-256 with the
+ * declared length. Returns the verified ETag that fences the promotion copy.
+ */
+async function verifyRustfsMultipartStagingObjectWithDependencies(
+  input: CompleteMultipartMediaAssetUploadInput,
+  stagingObjectInput: AssertMediaAssetObjectInput,
+  dependencies: MediaAssetStorageDependencies,
+): Promise<string> {
+  const config = dependencies.getMediaAssetsStorageConfigFn();
+  const context: MediaAssetStorageContext = {
+    workspaceId: input.workspaceId,
+    mediaAssetId: input.mediaAssetId,
+    storageKey: input.stagingStorageKey,
+    observationScope: input.observationScope,
+  };
+  const headMetadata =
+    await loadMediaAssetObjectMetadataWithAbortSignalAndDependencies(
+      stagingObjectInput,
+      input.signal,
+      dependencies,
+    );
+  assertMediaAssetObjectShapeAndProofMatches(stagingObjectInput, headMetadata);
+  const eTag = headMetadata.eTag;
+  if (eTag === null) {
+    throw new Error(
+      `S3 head_object did not return ETag for multipart staging object workspaceId=${input.workspaceId} mediaAssetId=${input.mediaAssetId}.`,
+    );
+  }
+
+  let observation: Awaited<ReturnType<typeof readMultipartObjectContentUnderETag>>;
+  try {
+    observation = await runMediaAssetStorageOperationWithRetriesAndAbortSignal(
+      context,
+      "get_object",
+      input.signal,
+      async () => readMultipartObjectContentUnderETag(
+        dependencies.s3Client,
+        config.bucketName,
+        input.stagingStorageKey,
+        eTag,
+        input.sizeBytes,
+        input.signal,
+        async () => undefined,
+      ),
+    );
+  } catch (error) {
+    rethrowMediaAssetStorageAbortReason(input.signal);
+    throw createMediaAssetStorageError(context, "get_object", error);
+  }
+  if (observation.metadata.eTag !== eTag) {
+    throw new HttpError(
+      409,
+      `Multipart staging object changed during verification. workspaceId=${input.workspaceId} mediaAssetId=${input.mediaAssetId}`,
+      "MEDIA_ASSET_UPLOAD_MISMATCH",
+    );
+  }
+  assertMediaAssetObjectShapeAndProofMatches(
+    stagingObjectInput,
+    observation.metadata,
+  );
+  assertMediaAssetObjectContentHashMatches(stagingObjectInput, {
+    sizeBytes: observation.sizeBytes,
+    sha256: observation.sha256 ?? "",
+  });
+  return eTag;
 }
 
 export async function createMultipartMediaAssetUploadWithDependencies(
@@ -233,12 +340,27 @@ export async function completeMultipartMediaAssetUploadWithCapabilityVerifier(
 ): Promise<void> {
   await assertMultipartCompletionMutationAuthorized(input, verifyCapability);
   const config = dependencies.getMediaAssetsStorageConfigFn();
+  assertMultipartCompletionSupportedByStorageProfile(
+    config,
+    dependencies.completedPartsManifestStore !== undefined,
+    input.workspaceId,
+    input.mediaAssetId,
+  );
   const context: MediaAssetStorageContext = {
     workspaceId: input.workspaceId,
     mediaAssetId: input.mediaAssetId,
     storageKey: input.stagingStorageKey,
     observationScope: input.observationScope,
   };
+  if (
+    config.profile === "rustfs"
+    && dependencies.completedPartsManifestStore !== undefined
+  ) {
+    await recordCompletedPartsManifest(
+      input,
+      dependencies.completedPartsManifestStore,
+    );
+  }
   const completedParts = [...input.parts]
     .sort((left, right) => left.partNumber - right.partNumber)
     .map((part) => ({
@@ -288,12 +410,18 @@ export async function completeMultipartMediaAssetUploadWithCapabilityVerifier(
     lastOperationId: input.lastOperationId,
     observationScope: input.observationScope,
   };
-  await normalizeMultipartStagingObjectWithDependencies(
-    input,
-    stagingObjectInput,
-    dependencies,
-    verifyCapability,
-  );
+  const verifiedStagingETag = config.profile === "rustfs"
+    ? await verifyRustfsMultipartStagingObjectWithDependencies(
+      input,
+      stagingObjectInput,
+      dependencies,
+    )
+    : await normalizeMultipartStagingObjectWithDependencies(
+      input,
+      stagingObjectInput,
+      dependencies,
+      verifyCapability,
+    );
 
   await promoteVerifiedMediaAssetUploadToBlobWithCapabilityVerifier(
     {
@@ -311,6 +439,9 @@ export async function completeMultipartMediaAssetUploadWithCapabilityVerifier(
       sha256: input.sha256,
       lastOperationId: input.lastOperationId,
       observationScope: input.observationScope,
+      ...(verifiedStagingETag === null
+        ? {}
+        : { uploadSourceETag: verifiedStagingETag }),
     },
     dependencies,
     verifyCapability,

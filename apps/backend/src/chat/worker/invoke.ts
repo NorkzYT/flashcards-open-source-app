@@ -209,6 +209,16 @@ export async function invokeChatWorkerOrPersistFailureWithDependencies(
   }
 }
 
+/**
+ * The standalone seam behind `invokeChatWorkerFn`. The durable dispatch row (and, for a personal key, its
+ * sealed credential) was committed with the run (`prepareChatRun`), and the standalone worker polls for
+ * it, so there is nothing to send and nothing that can fail after the commit. It never constructs a
+ * Lambda client and never serializes the personal key it may be handed.
+ */
+export async function dispatchStandaloneChatWorker(payload: ChatWorkerDispatch): Promise<void> {
+  assertTrustedChatWorkerInvocation(payload);
+}
+
 export async function invokeChatWorkerOrPersistFailure(
   payload: ChatWorkerDispatch,
 ): Promise<void> {

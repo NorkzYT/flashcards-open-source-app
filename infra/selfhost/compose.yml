@@ -1,0 +1,433 @@
+# Nibomo standalone (self-hosted) stack. Operator guide and design: docs/self-hosting.md.
+#
+# Always run it through the wrapper, which selects the project name, the instance .env and the
+# optional AI overlay consistently (from the deployment directory):
+#   bash sourc/infra/selfhost/compose.sh "$PWD" up -d --build
+# Every instance setting comes from that .env (created by infra/selfhost/setup.sh); every credential
+# is a file under ${NIBOMO_INSTANCE_DIR}/secrets. Only the gateway publishes a port.
+#
+# AI chat runs only with compose.ai.yml (operator-provided key); without it the API answers
+# AI_PROVIDER_NOT_CONFIGURED. MCP is served by `mcp` on https://${NIBOMO_MCP_HOST}/mcp with OAuth
+# signed by the mounted oidc_signing_key (no KMS).
+
+name: nibomo
+
+x-runtime-env: &runtime-env
+  DB_HOST: postgres
+  DB_NAME: flashcards
+  NODE_ENV: production
+
+# Backend, worker and media-maintenance: standalone chat dispatch, RustFS media storage, and no AWS
+# credential source. No AWS_* credential is ever set; disabling instance metadata makes any remaining
+# hosted-only SDK path fail with a credentials error instead of probing for one.
+x-standalone-backend-env: &standalone-backend-env
+  NIBOMO_DEPLOYMENT: standalone
+  NIBOMO_STANDALONE_AI_MONTHLY_MESSAGES: ${NIBOMO_AI_MONTHLY_MESSAGES:-100}
+  AWS_EC2_METADATA_DISABLED: "true"
+  MEDIA_ASSETS_STORAGE_PROFILE: rustfs
+  MEDIA_ASSETS_S3_BUCKET_NAME: ${NIBOMO_MEDIA_BUCKET:?}
+  MEDIA_ASSETS_S3_ENDPOINT: http://objectstore:9000
+  # Presigned URLs are signed for this origin; the gateway forwards them to RustFS unchanged.
+  MEDIA_ASSETS_S3_PUBLIC_ENDPOINT: https://${NIBOMO_MEDIA_HOST:?}
+  MEDIA_ASSETS_S3_REGION: us-east-1
+  MEDIA_ASSETS_S3_ACCESS_KEY_ID_FILE: /run/secrets/objectstore_media_access_key
+  MEDIA_ASSETS_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/objectstore_media_secret_key
+
+# Public origins the API and MCP processes hand to clients. Standalone mode requires every one of them
+# and never derives one from a request Host. The web app serves the site links and /icon.svg.
+x-standalone-public-urls: &standalone-public-urls
+  PUBLIC_APP_BASE_URL: https://${NIBOMO_APP_HOST:?}
+  PUBLIC_API_BASE_URL: https://${NIBOMO_API_HOST:?}/v1
+  PUBLIC_AUTH_BASE_URL: https://${NIBOMO_AUTH_HOST:?}
+  PUBLIC_MCP_BASE_URL: https://${NIBOMO_MCP_HOST:?}
+  PUBLIC_SITE_BASE_URL: https://${NIBOMO_APP_HOST:?}
+
+x-backend-image: &backend-image
+  build:
+    context: ../../apps/backend
+  image: nibomo-selfhost-backend:${NIBOMO_IMAGE_TAG:?set NIBOMO_IMAGE_TAG in .env}
+
+x-rustfs-image: &rustfs-image
+  # RustFS 1.0.6, pinned by digest (docs/self-hosting.md lists the verification).
+  image: rustfs/rustfs:1.0.6@sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a
+
+services:
+  postgres:
+    image: postgres:18.7
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: flashcards_owner
+      POSTGRES_DB: flashcards
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_owner_password
+    secrets:
+      - db_owner_password
+    volumes:
+      - pgdata:/var/lib/postgresql
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flashcards_owner -d flashcards -h 127.0.0.1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    stop_grace_period: 60s
+
+  objectstore:
+    <<: *rustfs-image
+    restart: unless-stopped
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_REGION: us-east-1
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_ACCESS_KEY_FILE: /run/secrets/objectstore_root_access_key
+      RUSTFS_SECRET_KEY_FILE: /run/secrets/objectstore_root_secret_key
+    secrets:
+      - objectstore_root_access_key
+      - objectstore_root_secret_key
+    volumes:
+      - objectdata:/data
+    # Private: reachable by backend, worker, media-maintenance, the init job and the gateway's
+    # signed-URL route only.
+    networks: [storage]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:9000/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+    stop_grace_period: 30s
+
+  # One-shot, idempotent: private bucket, expiry rules, and a bucket-scoped application user. The
+  # only holder of the root credential besides the server.
+  objectstore-init:
+    <<: *rustfs-image
+    depends_on:
+      objectstore:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/selfhost/objectstore-init.sh"]
+    environment:
+      OBJECTSTORE_ENDPOINT: http://objectstore:9000
+      MEDIA_BUCKET: ${NIBOMO_MEDIA_BUCKET:?}
+    secrets:
+      - objectstore_root_access_key
+      - objectstore_root_secret_key
+      - objectstore_media_access_key
+      - objectstore_media_secret_key
+    volumes:
+      - ./objectstore-init.sh:/selfhost/objectstore-init.sh:ro
+    tmpfs:
+      - /tmp:size=8m,mode=1777
+    networks: [storage]
+    restart: "no"
+
+  migrate:
+    build:
+      context: ../..
+      dockerfile: infra/selfhost/Dockerfile.migrate
+    image: nibomo-selfhost-migrate:${NIBOMO_IMAGE_TAG:?set NIBOMO_IMAGE_TAG in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_NAME: flashcards
+      DB_OWNER_USER: flashcards_owner
+      # Comma-separated bootstrap administrators; the migration grants and revokes only these.
+      ADMIN_EMAILS: ${NIBOMO_ADMIN_EMAILS:-}
+    secrets:
+      - db_owner_password
+      - db_backend_password
+      - db_auth_password
+    networks: [internal]
+    restart: "no"
+
+  auth:
+    build:
+      context: ../../apps/auth
+    image: nibomo-selfhost-auth:${NIBOMO_IMAGE_TAG:?set NIBOMO_IMAGE_TAG in .env}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/selfhost/runtime-env.sh"]
+    command: ["node", "dist/index.js"]
+    environment:
+      <<: *runtime-env
+      PORT: "8081"
+      DB_USER: auth_app
+      DB_PASSWORD_FILE: /run/secrets/db_auth_password
+      SESSION_ENCRYPTION_KEY_FILE: /run/secrets/session_encryption_key
+      AUTH_IDENTITY_PROVIDER: local
+      LOCAL_AUTH_ISSUER: https://${NIBOMO_AUTH_HOST:?}
+      LOCAL_AUTH_CLIENT_ID: ${NIBOMO_LOCAL_AUTH_CLIENT_ID:?}
+      LOCAL_AUTH_SIGNING_KEY_FILE: /run/secrets/local_auth_signing_key
+      LOCAL_AUTH_ALLOWED_EMAILS: ${NIBOMO_ALLOWED_EMAILS:-}
+      LOCAL_AUTH_ALLOWED_EMAIL_DOMAINS: ${NIBOMO_ALLOWED_EMAIL_DOMAINS:-}
+      SMTP_HOST: ${NIBOMO_SMTP_HOST:?}
+      SMTP_PORT: ${NIBOMO_SMTP_PORT:?}
+      SMTP_TLS_MODE: ${NIBOMO_SMTP_TLS_MODE:-starttls}
+      SMTP_USER: ${NIBOMO_SMTP_USER:-}
+      SMTP_PASSWORD_FILE: /run/secrets/smtp_password
+      SMTP_FROM: ${NIBOMO_SMTP_FROM:?}
+      LOCAL_AUTH_DEV_MAILBOX: ${NIBOMO_DEV_MAILBOX:-false}
+      ALLOWED_REDIRECT_URIS: https://${NIBOMO_APP_HOST:?}
+      COOKIE_DOMAIN: ${NIBOMO_BASE_DOMAIN:?}
+      PUBLIC_API_BASE_URL: https://${NIBOMO_API_HOST:?}/v1
+      # The OAuth issuer (must equal LOCAL_AUTH_ISSUER); also the origin the sign-in and consent
+      # pages post from, which the service sees as http:// behind the TLS proxy.
+      PUBLIC_AUTH_BASE_URL: https://${NIBOMO_AUTH_HOST:?}
+      # MCP OAuth: tokens are bound to these exact resources; id_tokens are signed with a key
+      # separate from the session identity key. Rotation: OIDC_VERIFICATION_KEYS_FILE (docs).
+      MCP_RESOURCE: https://${NIBOMO_MCP_HOST:?}/mcp
+      MCP_ALTERNATE_RESOURCE: ${NIBOMO_MCP_ALTERNATE_HOST:+https://${NIBOMO_MCP_ALTERNATE_HOST}/mcp}
+      OIDC_SIGNING_KEY_FILE: /run/secrets/oidc_signing_key
+    secrets:
+      - db_auth_password
+      - session_encryption_key
+      - local_auth_signing_key
+      - oidc_signing_key
+      - source: smtp_password
+        target: smtp_password
+    volumes:
+      - ./runtime-env.sh:/selfhost/runtime-env.sh:ro
+    # egress: outbound SMTP for sign-in codes.
+    networks: [internal, app, egress]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8081/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  backend:
+    <<: *backend-image
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      objectstore-init:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/selfhost/runtime-env.sh"]
+    command: ["node", "dist/entrypoints/index.js"]
+    environment:
+      <<: [*runtime-env, *standalone-backend-env, *standalone-public-urls]
+      PORT: "8080"
+      DB_USER: backend_app
+      DB_PASSWORD_FILE: /run/secrets/db_backend_password
+      AUTH_MODE: local
+      LOCAL_AUTH_ISSUER: https://${NIBOMO_AUTH_HOST:?}
+      LOCAL_AUTH_CLIENT_ID: ${NIBOMO_LOCAL_AUTH_CLIENT_ID:?}
+      LOCAL_AUTH_PUBLIC_KEY_FILE: /run/secrets/local_auth_public_key
+      BACKEND_ALLOWED_ORIGINS: https://${NIBOMO_APP_HOST:?}
+      COOKIE_DOMAIN: ${NIBOMO_BASE_DOMAIN:?}
+      # The AI chat live stream is served by this process (chat/live/standalone.ts); run-scoped
+      # tokens are signed with the mounted secret, never an AWS secret.
+      CHAT_LIVE_URL: https://${NIBOMO_API_HOST:?}/v1/chat/live
+      CHAT_LIVE_AUTH_SECRET_FILE: /run/secrets/chat_live_auth_secret
+      # HMAC key of the browser session/guest CSRF tokens; read at startup, never from AWS.
+      BACKEND_CSRF_SECRET_FILE: /run/secrets/backend_csrf_secret
+    secrets:
+      - db_backend_password
+      - local_auth_public_key
+      - chat_live_auth_secret
+      - backend_csrf_secret
+      - objectstore_media_access_key
+      - objectstore_media_secret_key
+    volumes:
+      - ./runtime-env.sh:/selfhost/runtime-env.sh:ro
+    # No outbound route; compose.ai.yml adds egress for the AI provider.
+    networks: [internal, app, storage]
+    restart: unless-stopped
+    healthcheck:
+      # /v1/health runs a database query, so healthy means the API can serve requests.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/v1/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
+  # MCP server (same image, entrypoints/mcp-node.ts). OAuth access tokens and agent keys are
+  # checked in Postgres; it serves mcp.<base> (and the optional alternate host) only, refuses
+  # unlisted browser Origins, and bounds concurrency per token and per process. No outbound network.
+  mcp:
+    <<: *backend-image
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/selfhost/runtime-env.sh"]
+    command: ["node", "dist/entrypoints/mcp-node.js"]
+    environment:
+      <<: [*runtime-env, *standalone-public-urls]
+      PORT: "8082"
+      DB_USER: backend_app
+      DB_PASSWORD_FILE: /run/secrets/db_backend_password
+      AUTH_MODE: local
+      AWS_EC2_METADATA_DISABLED: "true"
+      # Primary host mcp.<base>; the OAuth issuer is https://auth.<base>.
+      MCP_BASE_DOMAIN: ${NIBOMO_BASE_DOMAIN:?}
+      MCP_ALTERNATE_HOST: ${NIBOMO_MCP_ALTERNATE_HOST:-}
+      MCP_ALLOWED_ORIGINS: ${NIBOMO_MCP_ALLOWED_ORIGINS:-}
+    secrets:
+      - db_backend_password
+    volumes:
+      - ./runtime-env.sh:/selfhost/runtime-env.sh:ro
+    networks: [internal, app]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8082/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  # Durable chat worker (ai.chat_run_dispatches). Enabled only through compose.ai.yml, which
+  # supplies the operator's provider key; the wrapper adds both together.
+  worker:
+    <<: *backend-image
+    profiles: [ai]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      objectstore-init:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/selfhost/runtime-env.sh"]
+    command: ["node", "dist/entrypoints/chat-worker-node.js"]
+    environment:
+      <<: [*runtime-env, *standalone-backend-env]
+      DB_USER: backend_app
+      DB_PASSWORD_FILE: /run/secrets/db_backend_password
+      CHAT_WORKER_HEALTH_PORT: "8090"
+      CHAT_WORKER_HEALTH_BIND_HOST: 127.0.0.1
+    secrets:
+      - db_backend_password
+      - objectstore_media_access_key
+      - objectstore_media_secret_key
+    volumes:
+      - ./runtime-env.sh:/selfhost/runtime-env.sh:ro
+    networks: [internal, storage]
+    restart: unless-stopped
+    # SIGTERM stops leasing and drains in-flight runs within CHAT_WORKER_SHUTDOWN_GRACE_MS (30 s).
+    stop_grace_period: 45s
+    healthcheck:
+      # Ready only while dispatch polls keep reaching Postgres.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  # Scheduled media maintenance (entrypoints/media-maintenance-node.ts): generated-media promotion,
+  # orphaned-blob and released chat-file cleanup, multipart reconciliation. Not AI-gated: uploads and
+  # media exist without AI. Same DB role and bucket-scoped storage user as the API; one cycle at a time
+  # across processes (Postgres advisory lock). No published port, no outbound network.
+  media-maintenance:
+    <<: *backend-image
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      objectstore-init:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/selfhost/runtime-env.sh"]
+    command: ["node", "dist/entrypoints/media-maintenance-node.js"]
+    environment:
+      <<: [*runtime-env, *standalone-backend-env]
+      DB_USER: backend_app
+      DB_PASSWORD_FILE: /run/secrets/db_backend_password
+      MEDIA_BLOB_CLEANUP_ENABLED: "true"
+      MEDIA_MAINTENANCE_HEALTH_PORT: "8091"
+      MEDIA_MAINTENANCE_HEALTH_BIND_HOST: 127.0.0.1
+    secrets:
+      - db_backend_password
+      - objectstore_media_access_key
+      - objectstore_media_secret_key
+    volumes:
+      - ./runtime-env.sh:/selfhost/runtime-env.sh:ro
+    networks: [internal, storage]
+    restart: unless-stopped
+    # SIGTERM aborts the cycle and exits within MEDIA_MAINTENANCE_SHUTDOWN_GRACE_MS (20 s).
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8091/health/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: infra/selfhost/Dockerfile.gateway
+    image: nibomo-selfhost-gateway:${NIBOMO_IMAGE_TAG:?set NIBOMO_IMAGE_TAG in .env}
+    depends_on:
+      auth:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      mcp:
+        condition: service_healthy
+    environment:
+      NIBOMO_APP_HOST: ${NIBOMO_APP_HOST:?}
+      NIBOMO_API_HOST: ${NIBOMO_API_HOST:?}
+      NIBOMO_AUTH_HOST: ${NIBOMO_AUTH_HOST:?}
+      NIBOMO_MCP_HOST: ${NIBOMO_MCP_HOST:?}
+      NIBOMO_MCP_ALTERNATE_HOST: ${NIBOMO_MCP_ALTERNATE_HOST:-}
+      NIBOMO_MEDIA_HOST: ${NIBOMO_MEDIA_HOST:?}
+      NIBOMO_MEDIA_BUCKET: ${NIBOMO_MEDIA_BUCKET:?}
+      GATEWAY_TRUSTED_PROXIES: ${NIBOMO_GATEWAY_TRUSTED_PROXIES:-private_ranges}
+    ports:
+      # Loopback by default: put an existing TLS reverse proxy in front (docs/self-hosting.md).
+      - "${NIBOMO_GATEWAY_BIND:-127.0.0.1}:${NIBOMO_GATEWAY_PORT:-8088}:8080"
+    # storage: only for the signed media route to RustFS (Caddyfile).
+    networks: [app, edge, storage]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/__gateway/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+networks:
+  # Database network: Postgres, the migration job, auth, backend, mcp, worker and media-maintenance.
+  # No outbound route.
+  internal:
+    internal: true
+  # Gateway to auth/backend/mcp only; the gateway cannot reach Postgres.
+  app:
+    internal: true
+  # RustFS and its clients. No outbound route; RustFS is on no other network.
+  storage:
+    internal: true
+  edge: {}
+  egress: {}
+
+volumes:
+  pgdata:
+  objectdata:
+
+secrets:
+  db_owner_password:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/db_owner_password
+  db_backend_password:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/db_backend_password
+  db_auth_password:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/db_auth_password
+  session_encryption_key:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/session_encryption_key
+  backend_csrf_secret:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/backend_csrf_secret
+  local_auth_signing_key:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/local_auth_signing_key.pem
+  local_auth_public_key:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/local_auth_public_key.pem
+  oidc_signing_key:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/oidc_signing_key.pem
+  chat_live_auth_secret:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/chat_live_auth_secret
+  smtp_password:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/smtp_password
+  objectstore_root_access_key:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/objectstore_root_access_key
+  objectstore_root_secret_key:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/objectstore_root_secret_key
+  objectstore_media_access_key:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/objectstore_media_access_key
+  objectstore_media_secret_key:
+    file: ${NIBOMO_INSTANCE_DIR:?}/secrets/objectstore_media_secret_key
