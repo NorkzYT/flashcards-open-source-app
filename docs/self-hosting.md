@@ -308,8 +308,9 @@ networks:
 ```
 
 The file must be yours (or root's), not group/world-writable, in a directory that is not either, and
-contain nothing but this shape for `internal`, `app`, `storage`, `edge` or `egress`, so isolation and
-attachments stay exactly as in `compose.yml`. A subnet that overlaps an existing Docker network, or
+contain nothing but this shape for `internal`, `app`, `storage`, `edge`, `egress` or `ai` (the
+project-internal network of the [AI proxy](#ai-through-an-openai-compatible-proxy); Compose ignores the
+entry while no proxy is configured), so isolation and attachments stay exactly as in the Compose files. A subnet that overlaps an existing Docker network, or
 differs from the project's existing network, is refused. A project created with the overlay must
 always be addressed with it, and one created without it never with it.
 
@@ -357,16 +358,34 @@ Dedicated network (recommended; Nibomo never changes the proxy's own Compose pro
 
 ```bash
 docker network create --internal nibomo-ai-proxy
+docker ps --format '{{.Names}}'                     # find the proxy container's current name
 # --alias gives the URL's host on this network whatever the container is called; or add the network to the
 # proxy's own compose file
-docker network connect --alias cliproxyapi nibomo-ai-proxy <proxy container>
+docker network connect --alias cliproxyapi nibomo-ai-proxy <proxy container name>
 ```
+
+On a host whose Docker address pools are exhausted, `docker network create` also needs
+`--subnet <free private /24>`, and the project's `ai` network an `ai:` entry in the
+[network overlay](#explicit-network-subnets).
 
 `--internal` keeps the network itself unrouted while the proxy keeps its own networks for upstream
 traffic. A shared, routed network instead requires `NIBOMO_AI_PROXY_NETWORK_EGRESS=accepted`; it gives
 `ai-relay` (not `backend`/`worker`) that route and those neighbours.
 
-Changing these settings follows the AI-mode change rule above (`down`, edit, `--check`, `up -d`).
+Turning the proxy on or off changes the overlay set, so it follows the AI-mode change rule above.
+`down` is required there because `compose.sh` refuses to address containers created with another
+overlay set; it removes the project's containers and networks (no `-v`: volumes stay; take a backup
+first) and the instance is offline until `up` finishes. From the deployment root:
+
+```bash
+bash sourc/infra/selfhost/compose.sh "$PWD" down    # with the old .env still in place
+"${EDITOR:-vi}" .env                                 # set or clear the NIBOMO_AI_PROXY_* lines
+make selfhost-check
+make selfhost-up
+```
+
+With the proxy already on, changing only the URL, model or proxy network keeps the overlay set: edit
+`.env`, then `make selfhost-up`, which recreates the changed services; no `down`.
 Synthetic test of the refusals and the rendered network model:
 `bash infra/selfhost/tests/ai-proxy.sh <empty scratch dir>`; the streaming tool-call path against a
 loopback proxy: `node --test --import tsx src/chat/openai/providerEndpoint.integration.test.ts` in

@@ -429,6 +429,6 @@ nb_check_ai_proxy_network() {
     esac
   done
   if [[ "$internal" != true && "${NB_AI_PROXY_EGRESS:-}" != accepted ]]; then
-    nb_die "NIBOMO_AI_PROXY_NETWORK ${name} has an outbound route, so backend and worker could reach any host. Use an internal network (docker network create --internal) or set NIBOMO_AI_PROXY_NETWORK_EGRESS=accepted"
+    nb_die "NIBOMO_AI_PROXY_NETWORK ${name} has an outbound route: ai-relay, the only Nibomo container on it, would get that route (backend and worker reach only the relay). Use an internal network (docker network create --internal) or set NIBOMO_AI_PROXY_NETWORK_EGRESS=accepted"
   fi
 }
