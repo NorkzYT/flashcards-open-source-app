@@ -72,6 +72,13 @@ configure "${DEV[@]}" NIBOMO_COMPOSE_PROJECT=nibomo; expect refuse "dev mailbox 
 configure "${DEV[@]}" NIBOMO_SMTP_USER=someone; expect refuse "dev mailbox with SMTP login" "must not set NIBOMO_SMTP_USER"
 configure "${DEV[@]}" NIBOMO_GATEWAY_BIND=0.0.0.0; expect refuse "dev mailbox on a public bind" "NIBOMO_GATEWAY_BIND=127.0.0.1"
 configure "${DEV[@]}" NIBOMO_DEV_MAILBOX=yes; expect refuse "unknown dev mailbox value" "must be true, false or empty"
+base_domain() { local b="$1"; configure NIBOMO_BASE_DOMAIN="$b" NIBOMO_APP_HOST="app.$b" NIBOMO_API_HOST="api.$b" \
+  NIBOMO_AUTH_HOST="auth.$b" NIBOMO_MCP_HOST="mcp.$b" NIBOMO_MEDIA_HOST="media.$b"; }
+base_domain example-tailnet.ts.net; expect refuse "tailnet ts.net base (tailnet-wide cookies)" "must not be a tailnet's ts.net domain"
+base_domain ts.net;                 expect refuse "bare ts.net base" "must not be a tailnet's ts.net domain"
+base_domain node.example-tailnet.ts.net; expect refuse "base below a tailnet name" "must not be under ts.net"
+base_domain study.example-ts.net;   expect ok     "base merely ending in ts.net text passes"
+base_domain ts.net.example.test;    expect ok     "base merely containing ts.net passes"
 
 configure
 chmod 0644 "$I/secrets/backend_csrf_secret"; printf 'short\n' > "$I/secrets/backend_csrf_secret"

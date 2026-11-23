@@ -143,6 +143,14 @@ check_instance() {
     [[ "$value" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] \
       || { echo "$key must be a lower-case DNS name without scheme, port or path"; failed=1; }
   done
+  # Session and refresh cookies are scoped to the base. ts.net is a public suffix, so <tailnet>.ts.net
+  # is one registrable domain holding every device, Service and Funnel name of that tailnet; names
+  # below it are assigned by Tailscale, not by the operator.
+  if [[ "$base" == ts.net || "$base" =~ ^[^.]+\.ts\.net$ ]]; then
+    echo "NIBOMO_BASE_DOMAIN must not be a tailnet's ts.net domain: session cookies would reach every device, Service and Funnel host in it (docs/self-hosting-private-tailnet.md)"; failed=1
+  elif [[ "$base" == *.ts.net ]]; then
+    echo "NIBOMO_BASE_DOMAIN must not be under ts.net, whose names Tailscale assigns: use a base domain whose app., api., auth., mcp. and media names you control (docs/self-hosting-private-tailnet.md)"; failed=1
+  fi
   for key in APP API AUTH MCP; do
     value="$(get "NIBOMO_${key}_HOST")"
     [[ "$value" == "${key,,}.${base}" ]] || { echo "NIBOMO_${key}_HOST must be ${key,,}.${base} (client host derivation)"; failed=1; }
