@@ -162,6 +162,10 @@ observed request, e.g. that the OTP throttle sees distinct client addresses rath
 proxy address. Cookies are `Secure`, so browsers and
 phones need HTTPS; a plain `http://IP:PORT` setup is not a supported client configuration.
 
+For a tailnet-only instance, including on a host whose Tailscale node already serves a public
+Funnel, see [private tailnet ingress](self-hosting-private-tailnet.md); a `ts.net` base domain is
+refused because the session cookies would be shared across the tailnet.
+
 ## Operator commands
 
 The deployment directory holds the checkout in `sourc/` plus the instance state, which is never in

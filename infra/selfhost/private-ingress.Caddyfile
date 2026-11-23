@@ -1,0 +1,61 @@
+# Private ingress template: a loopback-only TLS terminator for the five Nibomo hosts, reached
+# through a raw TCP forwarder (for example `tailscale serve --tcp`) that sends PROXY protocol.
+# It is not part of the Compose stack. See docs/self-hosting-private-tailnet.md.
+#
+# Environment (read by Caddy when it parses this file):
+#   NIBOMO_APP_HOST, NIBOMO_API_HOST, NIBOMO_AUTH_HOST, NIBOMO_MCP_HOST, NIBOMO_MEDIA_HOST
+#                           the same values as the instance .env
+#   NIBOMO_INGRESS_PORT     loopback port the forwarder dials (default 9443)
+#   NIBOMO_INGRESS_CERT     PEM chain covering all five names, issued by DNS-01 (default /certs/fullchain.pem)
+#   NIBOMO_INGRESS_KEY      its private key (default /certs/privkey.pem)
+#   NIBOMO_GATEWAY_PORT     the gateway's published loopback port (default 8088)
+{
+	admin off
+	# No ACME, no HTTP->HTTPS redirect listener: certificates are files, the only socket is below.
+	auto_https off
+	servers {
+		listener_wrappers {
+			# Every connection must start with a PROXY header (v1 or v2); a bare connection is
+			# dropped, so the client address the gateway sees is the forwarder's, never guessed.
+			proxy_protocol {
+				timeout 5s
+				fallback_policy require
+			}
+			tls
+		}
+		# Refuse a request whose Host differs from the TLS server name (421).
+		strict_sni_host on
+	}
+}
+
+(nibomo_upstream) {
+	bind 127.0.0.1
+	tls {$NIBOMO_INGRESS_CERT:/certs/fullchain.pem} {$NIBOMO_INGRESS_KEY:/certs/privkey.pem}
+	reverse_proxy 127.0.0.1:{$NIBOMO_GATEWAY_PORT:8088} {
+		# Media URLs are signed for the exact Host and path: pass both through unchanged.
+		header_up Host {host}
+		header_up -Cf-Connecting-Ip
+		header_up -X-Real-Ip
+		header_up X-Forwarded-For {remote_host}
+	}
+}
+
+https://{$NIBOMO_APP_HOST}:{$NIBOMO_INGRESS_PORT:9443} {
+	import nibomo_upstream
+}
+
+https://{$NIBOMO_API_HOST}:{$NIBOMO_INGRESS_PORT:9443} {
+	import nibomo_upstream
+}
+
+https://{$NIBOMO_AUTH_HOST}:{$NIBOMO_INGRESS_PORT:9443} {
+	import nibomo_upstream
+}
+
+https://{$NIBOMO_MCP_HOST}:{$NIBOMO_INGRESS_PORT:9443} {
+	import nibomo_upstream
+}
+
+https://{$NIBOMO_MEDIA_HOST}:{$NIBOMO_INGRESS_PORT:9443} {
+	import nibomo_upstream
+}
