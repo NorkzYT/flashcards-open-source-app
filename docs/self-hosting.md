@@ -308,9 +308,13 @@ networks:
 ```
 
 The file must be yours (or root's), not group/world-writable, in a directory that is not either, and
-contain nothing but this shape for `internal`, `app`, `storage`, `edge`, `egress` or `ai` (the
-project-internal network of the [AI proxy](#ai-through-an-openai-compatible-proxy); Compose ignores the
-entry while no proxy is configured), so isolation and attachments stay exactly as in the Compose files. A subnet that overlaps an existing Docker network, or
+contain nothing but this shape for `internal`, `app`, `storage`, `edge`, `egress` or `ai`, so isolation
+and attachments stay exactly as in the Compose files. `ai` is the project-internal network of the
+[AI proxy](#ai-through-an-openai-compatible-proxy): list it only while the proxy is configured. With the
+proxy, `compose.ai-proxy.yml` defines it as internal and the overlay only adds the subnet. Without
+the proxy the entry alone would declare a plain, routed bridge: Compose v2.36.2 drops it because no
+service uses it (`config` omits it, `up` creates no network), other versions are untested, and
+`compose.sh` refuses an existing `ai` network that is not internal. A subnet that overlaps an existing Docker network, or
 differs from the project's existing network, is refused. A project created with the overlay must
 always be addressed with it, and one created without it never with it.
 
