@@ -8,6 +8,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=compose-lib.sh
+. "${SCRIPT_DIR}/compose-lib.sh"
 CHECK_ONLY=false
 if [[ "${1:-}" == "--check" ]]; then
   CHECK_ONLY=true
@@ -194,6 +196,12 @@ check_instance() {
     (( value >= 32 && value <= 4096 )) \
       || { echo "secrets/chat_credential_key must hold 32-4096 random bytes"; failed=1; }
   fi
+  local project
+  project="$(get NIBOMO_COMPOSE_PROJECT)"
+  value="$(nb_ai_proxy_problem "$(get NIBOMO_AI_PROVIDER)" "$(get NIBOMO_AI_PERSONAL_KEYS)" "${project:-nibomo}" \
+    "$(get NIBOMO_AI_PROXY_BASE_URL)" "$(get NIBOMO_AI_PROXY_NETWORK)" "$(get NIBOMO_AI_PROXY_NETWORK_EGRESS)" \
+    "$(get NIBOMO_AI_MODEL)")"
+  [[ -z "$value" ]] || { echo "$value"; failed=1; }
   value="$(get NIBOMO_AI_MONTHLY_MESSAGES)"
   # The digit-only regex runs before any arithmetic, so untrusted text never reaches (( )); 10# keeps
   # leading zeros decimal (08 is 8, not invalid octal).

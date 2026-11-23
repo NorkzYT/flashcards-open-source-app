@@ -92,6 +92,9 @@ async function main(): Promise<void> {
   const config = refuseOnConfigError(() => standalone.readStandaloneChatWorkerConfig());
   // Checked before the database: `user-key` needs the keyring and must not see an operator key.
   refuseOnConfigError(() => assertStandaloneAiFundingConfigured(config.credentialKeyring != null));
+  // A malformed OPENAI_BASE_URL or NIBOMO_OPENAI_MODEL stops the worker before it leases a run.
+  const { readOpenAIProviderEndpoint } = await import("../chat/openai/providerEndpoint");
+  const providerEndpoint = refuseOnConfigError(() => readOpenAIProviderEndpoint());
 
   const probe = await unsafeQuery<Readonly<{ ready: boolean }>>(DISPATCH_SCHEMA_PROBE_SQL, []);
   if (probe.rows[0]?.ready !== true) {
@@ -121,6 +124,9 @@ async function main(): Promise<void> {
     // by the API and any sealed run reaching this worker is interrupted.
     personalOpenAIKeys: config.credentialKeyring ? "sealed" : "refused",
     instanceId: config.credentialKeyring?.instanceId ?? null,
+    // Validated to carry no credentials, so both are safe to log.
+    openaiBaseUrl: providerEndpoint.baseURL,
+    openaiModelOverride: providerEndpoint.modelOverride,
   });
 
   let healthServer: Server | null = null;

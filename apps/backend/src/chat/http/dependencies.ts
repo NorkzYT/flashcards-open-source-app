@@ -35,6 +35,7 @@ import {
 } from "../store";
 import { dispatchStandaloneChatWorker, invokeChatWorkerOrPersistFailure } from "../worker/invoke";
 import { assertStandaloneAiFundingConfigured, isStandaloneChatDeployment } from "../deployment";
+import { readOpenAIProviderEndpoint } from "../openai/providerEndpoint";
 import { readStandaloneCredentialKeyring, type StandaloneCredentialKeyring } from "../runs/standaloneCredential";
 import {
   assertStandaloneAiUsageAllowanceNotReached,
@@ -142,6 +143,8 @@ export function createChatRouteDependencies(options: ChatRoutesOptions): ChatRou
   const standaloneCredentialKeyring = standalone ? readStandaloneCredentialKeyring() : null;
   // `user-key` funding without sealing, or with an operator key beside it, stops the API here too.
   if (standalone) assertStandaloneAiFundingConfigured(standaloneCredentialKeyring !== null);
+  // A malformed OPENAI_BASE_URL or NIBOMO_OPENAI_MODEL stops the API here, not on the first chat turn.
+  readOpenAIProviderEndpoint();
 
   return {
     allowedOrigins: options.allowedOrigins,

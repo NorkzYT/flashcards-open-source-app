@@ -45,7 +45,7 @@ make_checkout() {
   cp "$REPO/infra/selfhost/Makefile.deployment" "$dst/infra/selfhost/"
   fake_script "$dst/infra/selfhost/compose.sh"
   if [[ -n "$real_setup" ]]; then
-    cp "$REPO/infra/selfhost/setup.sh" "$REPO/infra/selfhost/env.example" "$dst/infra/selfhost/"
+    cp "$REPO/infra/selfhost/setup.sh" "$REPO/infra/selfhost/compose-lib.sh" "$REPO/infra/selfhost/env.example" "$dst/infra/selfhost/"
   else
     fake_script "$dst/infra/selfhost/setup.sh"
   fi

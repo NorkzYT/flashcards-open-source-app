@@ -55,6 +55,8 @@ BIND="$(get NIBOMO_GATEWAY_BIND)"
 [[ -z "$BIND" || "$BIND" == 127.0.0.1 ]] || refuse "the gateway must bind 127.0.0.1"
 EMAIL_DOMAIN="$(get NIBOMO_ALLOWED_EMAIL_DOMAINS | cut -d, -f1)"
 [[ -n "$EMAIL_DOMAIN" ]] || refuse "NIBOMO_ALLOWED_EMAIL_DOMAINS must list a test domain"
+# The synthetic provider replaces any provider route, so a configured proxy is never part of this run.
+[[ -z "$(get NIBOMO_AI_PROXY_BASE_URL)" ]] || refuse "NIBOMO_AI_PROXY_BASE_URL must be empty: the synthetic provider replaces it"
 [[ -s "${INSTANCE_DIR}/secrets/chat_credential_key" ]] || refuse "secrets/chat_credential_key is missing (run setup.sh)"
 
 OPERATOR_KEY_FILE="${INSTANCE_DIR}/secrets/openai_api_key"

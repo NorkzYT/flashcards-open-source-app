@@ -70,6 +70,7 @@ def render_container(fmt, c):
 
 def render_network(fmt, name, n):
     s = fmt.replace("{{range .IPAM.Config}}{{.Subnet}},{{end}}", "".join(x + "," for x in n.get("subnets", [])))
+    s = s.replace("{{range .Containers}}{{.Name}} {{end}}", "".join(x + " " for x in n.get("containers", [])))
     s = s.replace("{{.Name}}", name).replace("{{.Internal}}", "true" if n.get("internal") else "false")
     s = re.sub(r'\{\{index \.Labels "([^"]+)"\}\}', lambda m: n.get("labels", {}).get(m.group(1), ""), s)
     return s

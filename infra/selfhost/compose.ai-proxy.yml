@@ -1,0 +1,25 @@
+# AI through an operator-run OpenAI-compatible proxy (e.g. CLIProxyAPI) instead of api.openai.com.
+# compose.sh adds this file after compose.ai.yml only when the instance .env sets
+# NIBOMO_AI_PROXY_BASE_URL; it requires NIBOMO_AI_PROVIDER=openai with personal keys refused, so the only
+# credential the proxy ever sees is secrets/openai_api_key (the proxy's client key, read from the file).
+#
+# Backend and worker lose the `egress` network: their only route out is NIBOMO_AI_PROXY_NETWORK, an
+# existing Docker network this project never creates or changes. Postgres, RustFS and every other service
+# stay off it. compose-lib.sh refuses a network that is missing, is one of this project's own, already
+# holds this project's postgres/objectstore, or has an outbound route unless
+# NIBOMO_AI_PROXY_NETWORK_EGRESS=accepted. Design and commands: docs/self-hosting.md ("AI through an
+# OpenAI-compatible proxy").
+services:
+  backend:
+    environment:
+      OPENAI_BASE_URL: ${NIBOMO_AI_PROXY_BASE_URL:?}
+    networks: !override [internal, app, storage, ai-proxy]
+  worker:
+    environment:
+      OPENAI_BASE_URL: ${NIBOMO_AI_PROXY_BASE_URL:?}
+    networks: !override [internal, storage, ai-proxy]
+
+networks:
+  ai-proxy:
+    external: true
+    name: ${NIBOMO_AI_PROXY_NETWORK:?}

@@ -9,6 +9,7 @@ x-user-key-ai: &user-key-ai
   NIBOMO_STANDALONE_AI_FUNDING: user-key
   NIBOMO_CHAT_CREDENTIAL_KEY_FILE: /run/secrets/chat_credential_key
   NIBOMO_INSTANCE_ID: ${NIBOMO_INSTANCE_ID:?NIBOMO_AI_PROVIDER=user-key needs NIBOMO_INSTANCE_ID (setup.sh generates it)}
+  NIBOMO_OPENAI_MODEL: ${NIBOMO_AI_MODEL:-}
 
 services:
   backend:

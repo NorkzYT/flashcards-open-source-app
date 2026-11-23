@@ -126,9 +126,9 @@ disabled; without an AI overlay the backend has no outbound network at all.
 | `objectstore` | `rustfs/rustfs:1.0.6@sha256:ee717072…05044a` | storage | volume `objectdata`; no published port, console off |
 | `objectstore-init` | built (`Dockerfile.objectstore-init`: the same pinned RustFS image + init script) | storage | one-shot; gates `backend` and `worker` |
 | `auth` | built (`apps/auth/Dockerfile`, `standalone` stage) | internal + app + egress | egress only for SMTP |
-| `backend` | built (`apps/backend/Dockerfile`, `standalone` stage) | internal + app + storage (+ egress with AI) | healthy only when `/v1/health` reaches Postgres |
+| `backend` | built (`apps/backend/Dockerfile`, `standalone` stage) | internal + app + storage (+ egress, or the proxy network, with AI) | healthy only when `/v1/health` reaches Postgres |
 | `mcp` | backend image (`entrypoints/mcp-node.js`) | internal + app | healthy on `/health`; no outbound route |
-| `worker` | backend image, profile `ai` | internal + storage + egress | only with an AI overlay |
+| `worker` | backend image, profile `ai` | internal + storage + egress (or the proxy network) | only with an AI overlay |
 | `media-maintenance` | backend image (`entrypoints/media-maintenance-node.js`) | internal + storage | always; healthy while cycles succeed; no outbound route |
 | `gateway` | built (`Dockerfile.gateway`, Caddy 2.10.2) | app + edge + storage | the only published port, loopback by default; cannot reach Postgres |
 
@@ -312,6 +312,47 @@ always be addressed with it, and one created without it never with it.
 The synthetic safety test of these scripts (no Docker daemon involved):
 `bash infra/selfhost/tests/backup-restore-safety.sh <empty scratch dir>`. The `setup.sh --check` rules (CSRF key,
 test mailbox isolation): `bash infra/selfhost/tests/setup-check.sh <empty scratch dir>`.
+
+## AI through an OpenAI-compatible proxy
+
+With `NIBOMO_AI_PROVIDER=openai`, chat can go to an operator-run OpenAI-compatible proxy (for example
+CLIProxyAPI) instead of `api.openai.com`. The proxy must serve the Responses API with streaming and
+function calls; dictation and card images use the same endpoint with their built-in models.
+
+```bash
+# .env (no secret here); secrets/openai_api_key holds the proxy's client key, never the URL
+NIBOMO_AI_PROVIDER=openai
+NIBOMO_AI_PERSONAL_KEYS=                       # must stay empty: personal keys would reach the proxy
+NIBOMO_AI_PROXY_BASE_URL=http://cliproxyapi:8317/v1
+NIBOMO_AI_PROXY_NETWORK=nibomo-ai-proxy        # existing Docker network the proxy container is on
+NIBOMO_AI_MODEL=<model the proxy serves>       # optional; also valid without a proxy
+```
+
+[compose.ai-proxy.yml](../infra/selfhost/compose.ai-proxy.yml) then replaces `egress` on `backend`
+and `worker` with that network; no other service joins it, so Postgres and RustFS stay unreachable
+from it. `compose.sh` only inspects the network and refuses one that is missing, is one of the
+project's own, already holds the project's `postgres`/`objectstore`, or has an outbound route. The
+backend validates the URL again at start (http/https, no credentials, query or fragment) and passes it
+to every OpenAI client explicitly, so there is no fallback to `api.openai.com`.
+
+Dedicated network (recommended; Nibomo never changes the proxy's own Compose project):
+
+```bash
+docker network create --internal nibomo-ai-proxy
+docker network connect nibomo-ai-proxy cliproxyapi   # or add the network to the proxy's own compose file
+```
+
+`--internal` gives `backend` and `worker` no route beyond the proxy, while the proxy keeps its own
+networks for upstream traffic. Every container on this network can reach `backend:8080` directly
+(bypassing the gateway) and resolves the service names `backend` and `worker`, so attach only the
+proxy. Reusing a shared, routed network instead requires `NIBOMO_AI_PROXY_NETWORK_EGRESS=accepted`
+and gives both services that network's outbound route and its neighbours.
+
+Changing these settings follows the AI-mode change rule above (`down`, edit, `--check`, `up -d`).
+Synthetic test of the refusals and the rendered network model:
+`bash infra/selfhost/tests/ai-proxy.sh <empty scratch dir>`; the streaming tool-call path against a
+loopback proxy: `node --test --import tsx src/chat/openai/providerEndpoint.integration.test.ts` in
+`apps/backend`.
 
 ## Testing a stack
 

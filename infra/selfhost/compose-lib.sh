@@ -205,6 +205,35 @@ nb_load_network_file() {
   done
 }
 
+# --- AI proxy settings ----------------------------------------------------------------------------
+
+# Prints the first problem with the AI model/proxy settings, or nothing when they are valid. Shared by
+# compose.sh (enforced on every call) and `setup.sh --check`. The backend re-validates both values at start.
+#   nb_ai_proxy_problem <provider> <personal_keys> <project> <base_url> <network> <egress> <model>
+nb_ai_proxy_problem() {
+  local provider="$1" personal="$2" project="$3" url="$4" network="$5" egress="$6" model="$7"
+  if [[ -n "$model" && ! "$model" =~ ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$ ]]; then
+    echo "NIBOMO_AI_MODEL must be 1-128 letters, digits and . _ : / - starting with a letter or digit"; return
+  fi
+  if [[ -z "$url" ]]; then
+    [[ -z "$network" && -z "$egress" ]] \
+      || echo "NIBOMO_AI_PROXY_NETWORK and NIBOMO_AI_PROXY_NETWORK_EGRESS need NIBOMO_AI_PROXY_BASE_URL"
+    return
+  fi
+  # A proxy receives every key the API forwards, so it is limited to the operator's own key.
+  [[ "$provider" == openai ]] || { echo "NIBOMO_AI_PROXY_BASE_URL needs NIBOMO_AI_PROVIDER=openai"; return; }
+  [[ -z "$personal" ]] \
+    || { echo "NIBOMO_AI_PROXY_BASE_URL needs NIBOMO_AI_PERSONAL_KEYS empty: personal keys would be sent to the proxy"; return; }
+  # No credentials, query or fragment: the URL lands in container config and worker logs.
+  [[ "$url" =~ ^https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*/?$ ]] \
+    || { echo "NIBOMO_AI_PROXY_BASE_URL must be http(s)://host[:port][/path] without credentials, query or fragment"; return; }
+  [[ "$network" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] \
+    || { echo "NIBOMO_AI_PROXY_BASE_URL needs NIBOMO_AI_PROXY_NETWORK, the existing Docker network the proxy is on"; return; }
+  [[ "$network" != "${project}_"* ]] \
+    || { echo "NIBOMO_AI_PROXY_NETWORK must not be one of project ${project}'s own networks"; return; }
+  [[ -z "$egress" || "$egress" == accepted ]] || echo "NIBOMO_AI_PROXY_NETWORK_EGRESS must be empty or accepted"
+}
+
 # --- Instance resolution --------------------------------------------------------------------------
 
 # Sets NB_INSTANCE_DIR, NB_ENV_FILE, NB_PROJECT, NB_DOCKER_HOST, NB_COMPOSE_ARGS and NB_CONFIG_FILES
@@ -220,13 +249,18 @@ nb_resolve_instance() {
   [[ -f "$NB_ENV_FILE" && ! -L "$NB_ENV_FILE" ]] || nb_die "${NB_ENV_FILE} not found (or is a symlink); run setup.sh first"
 
   # Read every setting into a variable first: a refusal inside $(...) must stop the script.
-  local env_instance env_network env_project env_docker_host env_ai env_mailbox
+  local env_instance env_network env_project env_docker_host env_ai env_mailbox env_personal env_model problem
   env_instance="$(nb_env_get "$NB_ENV_FILE" NIBOMO_INSTANCE_DIR)"
   env_network="$(nb_env_get "$NB_ENV_FILE" NIBOMO_COMPOSE_NETWORK_FILE)"
   env_project="$(nb_env_get "$NB_ENV_FILE" NIBOMO_COMPOSE_PROJECT)"
   env_docker_host="$(nb_env_get "$NB_ENV_FILE" NIBOMO_DOCKER_HOST)"
   env_ai="$(nb_env_get "$NB_ENV_FILE" NIBOMO_AI_PROVIDER)"
   env_mailbox="$(nb_env_get "$NB_ENV_FILE" NIBOMO_DEV_MAILBOX)"
+  env_personal="$(nb_env_get "$NB_ENV_FILE" NIBOMO_AI_PERSONAL_KEYS)"
+  env_model="$(nb_env_get "$NB_ENV_FILE" NIBOMO_AI_MODEL)"
+  NB_AI_PROXY_BASE_URL="$(nb_env_get "$NB_ENV_FILE" NIBOMO_AI_PROXY_BASE_URL)"
+  NB_AI_PROXY_NETWORK="$(nb_env_get "$NB_ENV_FILE" NIBOMO_AI_PROXY_NETWORK)"
+  NB_AI_PROXY_EGRESS="$(nb_env_get "$NB_ENV_FILE" NIBOMO_AI_PROXY_NETWORK_EGRESS)"
   [[ "$env_instance" == "$instance_dir" ]] \
     || nb_die "NIBOMO_INSTANCE_DIR in ${NB_ENV_FILE} does not match ${instance_dir}"
   [[ -z "$env_network" ]] \
@@ -256,6 +290,10 @@ nb_resolve_instance() {
       ;;
     *) nb_die "NIBOMO_AI_PROVIDER must be none, openai or user-key" ;;
   esac
+  problem="$(nb_ai_proxy_problem "$env_ai" "$env_personal" "$NB_PROJECT" "$NB_AI_PROXY_BASE_URL" \
+    "$NB_AI_PROXY_NETWORK" "$NB_AI_PROXY_EGRESS" "$env_model")"
+  [[ -z "$problem" ]] || nb_die "$problem"
+  [[ -z "$NB_AI_PROXY_BASE_URL" ]] || files+=("${selfhost_dir}/compose.ai-proxy.yml")
   if [[ "$env_mailbox" == "true" ]]; then
     [[ "$NB_PROJECT" != "nibomo" ]] \
       || nb_die "the development mailbox is for isolated test projects, never project nibomo"
@@ -314,6 +352,8 @@ Use the same checkout, AI/mailbox settings and NIBOMO_COMPOSE_NETWORK_FILE that 
     done <<<"$listing"
   fi
 
+  [[ -z "${NB_AI_PROXY_BASE_URL:-}" ]] || nb_check_ai_proxy_network
+
   local missing=()
   for key in "${!NB_NETWORK_SUBNETS[@]}"; do
     [[ -n "${existing[$key]:-}" ]] || missing+=("$key")
@@ -337,4 +377,26 @@ Use the same checkout, AI/mailbox settings and NIBOMO_COMPOSE_NETWORK_FILE that 
       done
     done
   done <<<"$listing"
+}
+
+# The proxy network is the operator's: it must exist, not be this project's own, hold none of this
+# project's data services, and have no outbound route unless NIBOMO_AI_PROXY_NETWORK_EGRESS=accepted.
+# Read-only; it never creates, connects or changes anything.
+nb_check_ai_proxy_network() {
+  local name="$NB_AI_PROXY_NETWORK" info owner internal containers c
+  info="$(nb_docker network inspect -f \
+    '{{index .Labels "com.docker.compose.project"}}|{{.Internal}}|{{range .Containers}}{{.Name}} {{end}}' "$name" 2>/dev/null)" \
+    || nb_die "NIBOMO_AI_PROXY_NETWORK ${name} does not exist; create it and attach the proxy (docs/self-hosting.md)"
+  # '|', not a tab: IFS whitespace would collapse an empty (unlabelled) first field.
+  IFS='|' read -r owner internal containers <<<"$info"
+  [[ "$owner" != "$NB_PROJECT" ]] || nb_die "NIBOMO_AI_PROXY_NETWORK ${name} is one of project ${NB_PROJECT}'s own networks"
+  for c in $containers; do
+    case "$c" in
+      "${NB_PROJECT}-postgres-"* | "${NB_PROJECT}-objectstore-"* | "${NB_PROJECT}-objectstore-init-"* | "${NB_PROJECT}-migrate-"*)
+        nb_die "NIBOMO_AI_PROXY_NETWORK ${name} already holds ${c}; disconnect it, data services must stay off the proxy network" ;;
+    esac
+  done
+  if [[ "$internal" != true && "${NB_AI_PROXY_EGRESS:-}" != accepted ]]; then
+    nb_die "NIBOMO_AI_PROXY_NETWORK ${name} has an outbound route, so backend and worker could reach any host. Use an internal network (docker network create --internal) or set NIBOMO_AI_PROXY_NETWORK_EGRESS=accepted"
+  fi
 }

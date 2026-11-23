@@ -11,6 +11,7 @@ import {
 } from "../replayItems";
 import type { ExecutedChatToolCall } from "../tools/tools";
 import { buildOpenAISafetyIdentifier } from "../safetyIdentifier";
+import { resolveOpenAIRequestModel } from "../providerEndpoint";
 import {
   CHAT_COMPACT_THRESHOLD_TOKENS,
   CHAT_MAX_OUTPUT_TOKENS,
@@ -44,7 +45,8 @@ const PROVIDER_OVERLOAD_RETRY_BASE_DELAY_MS = 1_000;
 const PROVIDER_OVERLOAD_RETRY_JITTER_MS = 1_000;
 
 export type OpenAIResponsesRequest = Readonly<{
-  model: ChatRuntimeModelId;
+  /** The built-in model id, or the standalone NIBOMO_OPENAI_MODEL override (providerEndpoint.ts). */
+  model: string;
   store: false;
   include: ["reasoning.encrypted_content"];
   tools: Array<OpenAI.Responses.Tool>;
@@ -224,7 +226,7 @@ export function buildOpenAIResponsesRequest(
   params: BuildOpenAIResponsesRequestParams,
 ): OpenAIResponsesRequest {
   return {
-    model: params.modelId,
+    model: resolveOpenAIRequestModel(params.modelId),
     store: false,
     include: ["reasoning.encrypted_content"],
     tools: [...params.tools],

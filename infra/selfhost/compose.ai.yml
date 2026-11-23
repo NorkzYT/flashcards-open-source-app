@@ -12,6 +12,8 @@
 x-chat-credentials: &chat-credentials
   NIBOMO_CHAT_CREDENTIAL_KEY_FILE: ${NIBOMO_AI_PERSONAL_KEYS:+/run/secrets/chat_credential_key.${NIBOMO_AI_PERSONAL_KEYS}}
   NIBOMO_INSTANCE_ID: ${NIBOMO_INSTANCE_ID:-}
+  # Optional model sent instead of the built-in chat and suggestion models (apps/backend providerEndpoint.ts).
+  NIBOMO_OPENAI_MODEL: ${NIBOMO_AI_MODEL:-}
 
 services:
   backend:
