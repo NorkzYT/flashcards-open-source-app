@@ -9,8 +9,8 @@
 #
 # AI: NIBOMO_AI_PROVIDER=openai adds compose.ai.yml and the `ai` profile (worker), and requires a
 # non-empty secrets/openai_api_key; `none` (default) leaves chat unavailable with a clear error.
-# NIBOMO_AI_PROXY_BASE_URL (with `openai`) adds compose.ai-proxy.yml: backend/worker reach the proxy on
-# NIBOMO_AI_PROXY_NETWORK instead of egress.
+# NIBOMO_AI_PROXY_BASE_URL (with `openai`) adds compose.ai-proxy.yml: backend/worker lose egress and reach
+# the proxy only through ai-relay, the one container on NIBOMO_AI_PROXY_NETWORK.
 # Development mailbox: NIBOMO_DEV_MAILBOX=true adds compose.devmail.yml, refused for project nibomo.
 # Network subnets: NIBOMO_COMPOSE_NETWORK_FILE=<overlay> (shell, optional) is added last.
 set -euo pipefail

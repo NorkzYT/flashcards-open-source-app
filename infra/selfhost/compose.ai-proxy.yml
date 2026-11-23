@@ -3,23 +3,53 @@
 # NIBOMO_AI_PROXY_BASE_URL; it requires NIBOMO_AI_PROVIDER=openai with personal keys refused, so the only
 # credential the proxy ever sees is secrets/openai_api_key (the proxy's client key, read from the file).
 #
-# Backend and worker lose the `egress` network: their only route out is NIBOMO_AI_PROXY_NETWORK, an
-# existing Docker network this project never creates or changes. Postgres, RustFS and every other service
-# stay off it. compose-lib.sh refuses a network that is missing, is one of this project's own, already
-# holds this project's postgres/objectstore, or has an outbound route unless
-# NIBOMO_AI_PROXY_NETWORK_EGRESS=accepted. Design and commands: docs/self-hosting.md ("AI through an
-# OpenAI-compatible proxy").
+# Backend and worker lose `egress` and join only `ai`, a project-internal network whose one other member
+# is `ai-relay`. The relay answers there under the proxy's hostname (so URL, Host and TLS name stay the
+# operator's) and forwards raw TCP to that one host on NIBOMO_AI_PROXY_NETWORK, the existing Docker
+# network this project never creates or changes. The relay is the only Nibomo container on it, so the
+# proxy and its neighbours cannot reach backend or worker. compose.sh sets NIBOMO_AI_RELAY_HOST/PORT from
+# the URL and NIBOMO_AI_RELAY_AI_NETWORK=<project>_ai. compose-lib.sh refuses a proxy network that is
+# missing, is this project's own, holds any other container of this project, or has an outbound route
+# unless NIBOMO_AI_PROXY_NETWORK_EGRESS=accepted.
+# Design and commands: docs/self-hosting.md ("AI through an OpenAI-compatible proxy").
 services:
+  ai-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.ai-relay
+    image: nibomo-selfhost-ai-relay:${NIBOMO_IMAGE_TAG:?}
+    environment:
+      AI_RELAY_LISTEN_HOST: ${NIBOMO_AI_RELAY_HOST:?set by compose.sh from NIBOMO_AI_PROXY_BASE_URL}
+      AI_RELAY_PORT: ${NIBOMO_AI_RELAY_PORT:?set by compose.sh from NIBOMO_AI_PROXY_BASE_URL}
+      # <name>.<network>: Docker DNS answers only from that network, so neither side can be confused.
+      AI_RELAY_LISTEN_NAME: ${NIBOMO_AI_RELAY_HOST:?}.${NIBOMO_AI_RELAY_AI_NETWORK:?set by compose.sh}
+      AI_RELAY_UPSTREAM_HOST: ${NIBOMO_AI_RELAY_HOST:?}.${NIBOMO_AI_PROXY_NETWORK:?}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      ai:
+        aliases: ["${NIBOMO_AI_RELAY_HOST:?}"]
+      ai-proxy: {}
+    restart: unless-stopped
   backend:
+    depends_on:
+      ai-relay:
+        condition: service_started
     environment:
       OPENAI_BASE_URL: ${NIBOMO_AI_PROXY_BASE_URL:?}
-    networks: !override [internal, app, storage, ai-proxy]
+    networks: !override [internal, app, storage, ai]
   worker:
+    depends_on:
+      ai-relay:
+        condition: service_started
     environment:
       OPENAI_BASE_URL: ${NIBOMO_AI_PROXY_BASE_URL:?}
-    networks: !override [internal, storage, ai-proxy]
+    networks: !override [internal, storage, ai]
 
 networks:
+  ai:
+    internal: true
   ai-proxy:
     external: true
     name: ${NIBOMO_AI_PROXY_NETWORK:?}

@@ -119,6 +119,7 @@ test("a chat turn with a tool call streams through the configured proxy with the
   process.stderr.write = capture as typeof process.stderr.write;
 
   const toolCalls: Array<string> = [];
+  const usageModels: Array<string> = [];
   const { sink, events } = collectEvents();
   let completion: Awaited<ReturnType<typeof startOpenAILoopWithDeps>>;
   try {
@@ -129,6 +130,9 @@ test("a chat turn with a tool call streams through the configured proxy with the
         toolCalls.push(`${params.item.name}:${params.item.call_id}:${params.item.arguments}`);
         return { output: "{\"workspaces\":[]}", isMutating: false, succeeded: true };
       }),
+      appendAiUsageEvent: async (event) => {
+        usageModels.push(event.modelId);
+      },
       getOpenAIClient,
       buildChatCompletionInput,
       buildChatCompletionInputWithBudget,
@@ -143,6 +147,8 @@ test("a chat turn with a tool call streams through the configured proxy with the
   assert.equal(completion.terminationReason, "completed");
   assert.deepEqual(toolCalls, ["list_workspaces:call-proxy-1:{}"]);
   assert.equal(requests.length, 2);
+  // Usage rows carry the id actually called, never the built-in id it replaced (ai.usage_events.model_id).
+  assert.deepEqual(usageModels, [PROXY_MODEL, PROXY_MODEL]);
   for (const request of requests) {
     assert.equal(request.path, "/proxy-prefix/v1/responses");
     assert.equal(request.authorization, `Bearer ${SYNTHETIC_KEY}`);

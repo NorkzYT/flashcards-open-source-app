@@ -19,7 +19,10 @@
 
 NB_DEFAULT_DOCKER_HOST="unix:///var/run/docker.sock"
 # Compose network keys and whether each must be an internal (no outbound route) network.
-declare -A NB_NETWORK_INTERNAL=([internal]=true [app]=true [storage]=true [edge]=false [egress]=false)
+declare -A NB_NETWORK_INTERNAL=([internal]=true [app]=true [storage]=true [edge]=false [egress]=false [ai]=true)
+# Derived settings handed to Compose next to the scrubbed environment (nb_resolve_instance); never read
+# from the calling shell, which nb_check_shell_env already refuses for NIBOMO_*.
+NB_COMPOSE_ENV=()
 
 nb_die() {
   echo "ERROR: $*" >&2
@@ -79,7 +82,7 @@ nb_set_docker_host() {
 nb_docker() {
   [[ -n "${NB_DOCKER_HOST:-}" ]] || nb_die "internal: Docker endpoint not resolved"
   env -i PATH="$PATH" HOME="${HOME:-/nonexistent}" LANG="${LANG:-C.UTF-8}" TERM="${TERM:-dumb}" \
-    TMPDIR="${TMPDIR:-/tmp}" DOCKER_HOST="$NB_DOCKER_HOST" docker "$@"
+    TMPDIR="${TMPDIR:-/tmp}" DOCKER_HOST="$NB_DOCKER_HOST" "${NB_COMPOSE_ENV[@]}" docker "$@"
 }
 
 nb_compose() {
@@ -130,7 +133,7 @@ nb_cidr_is_private() {
 # Validates the overlay file and fills NB_NETWORK_SUBNETS[<network key>]=<cidr>. The only accepted
 # shape (comments and blank lines aside) is, per network, exactly:
 #   networks:
-#     <internal|app|storage|edge|egress>:
+#     <internal|app|storage|edge|egress|ai>:
 #       ipam:
 #         config:
 #           - subnet: <private IPv4 CIDR, /16 to /28>
@@ -227,11 +230,30 @@ nb_ai_proxy_problem() {
   # No credentials, query or fragment: the URL lands in container config and worker logs.
   [[ "$url" =~ ^https?://[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*/?$ ]] \
     || { echo "NIBOMO_AI_PROXY_BASE_URL must be http(s)://host[:port][/path] without credentials, query or fragment"; return; }
+  # ai-relay answers under this name on the project's `ai` network and dials <host>.<network>, which
+  # Docker DNS resolves only for a container on that network: a single label, not a project service.
+  local host port
+  host="$(nb_ai_proxy_host "$url")"; port="$(nb_ai_proxy_port "$url")"
+  [[ "$host" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ && ! "$host" =~ ^[0-9]+$ ]] \
+    || { echo "NIBOMO_AI_PROXY_BASE_URL host must be the proxy container's name on NIBOMO_AI_PROXY_NETWORK (one DNS label, no dots or IP address)"; return; }
+  case "$host" in
+    localhost | ai-relay | backend | worker | postgres | objectstore | objectstore-init | migrate | auth | mcp | media-maintenance | gateway | mailpit)
+      echo "NIBOMO_AI_PROXY_BASE_URL host ${host} is reserved by this stack; use the proxy container's own name"; return ;;
+  esac
+  (( 10#$port >= 1 && 10#$port <= 65535 )) || { echo "NIBOMO_AI_PROXY_BASE_URL port must be 1-65535"; return; }
   [[ "$network" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] \
     || { echo "NIBOMO_AI_PROXY_BASE_URL needs NIBOMO_AI_PROXY_NETWORK, the existing Docker network the proxy is on"; return; }
   [[ "$network" != "${project}_"* ]] \
     || { echo "NIBOMO_AI_PROXY_NETWORK must not be one of project ${project}'s own networks"; return; }
   [[ -z "$egress" || "$egress" == accepted ]] || echo "NIBOMO_AI_PROXY_NETWORK_EGRESS must be empty or accepted"
+}
+
+# Host and port of an already validated proxy URL (port defaults to the scheme's).
+nb_ai_proxy_host() { local rest="${1#*://}"; rest="${rest%%/*}"; printf '%s' "${rest%%:*}"; }
+nb_ai_proxy_port() {
+  local rest="${1#*://}"; rest="${rest%%/*}"
+  if [[ "$rest" == *:* ]]; then printf '%s' "$((10#${rest##*:}))"
+  elif [[ "$1" == https://* ]]; then printf 443; else printf 80; fi
 }
 
 # --- Instance resolution --------------------------------------------------------------------------
@@ -293,7 +315,12 @@ nb_resolve_instance() {
   problem="$(nb_ai_proxy_problem "$env_ai" "$env_personal" "$NB_PROJECT" "$NB_AI_PROXY_BASE_URL" \
     "$NB_AI_PROXY_NETWORK" "$NB_AI_PROXY_EGRESS" "$env_model")"
   [[ -z "$problem" ]] || nb_die "$problem"
-  [[ -z "$NB_AI_PROXY_BASE_URL" ]] || files+=("${selfhost_dir}/compose.ai-proxy.yml")
+  NB_COMPOSE_ENV=()
+  if [[ -n "$NB_AI_PROXY_BASE_URL" ]]; then
+    files+=("${selfhost_dir}/compose.ai-proxy.yml")
+    NB_COMPOSE_ENV=("NIBOMO_AI_RELAY_HOST=$(nb_ai_proxy_host "$NB_AI_PROXY_BASE_URL")"
+      "NIBOMO_AI_RELAY_PORT=$(nb_ai_proxy_port "$NB_AI_PROXY_BASE_URL")" "NIBOMO_AI_RELAY_AI_NETWORK=${NB_PROJECT}_ai")
+  fi
   if [[ "$env_mailbox" == "true" ]]; then
     [[ "$NB_PROJECT" != "nibomo" ]] \
       || nb_die "the development mailbox is for isolated test projects, never project nibomo"
@@ -379,8 +406,9 @@ Use the same checkout, AI/mailbox settings and NIBOMO_COMPOSE_NETWORK_FILE that 
   done <<<"$listing"
 }
 
-# The proxy network is the operator's: it must exist, not be this project's own, hold none of this
-# project's data services, and have no outbound route unless NIBOMO_AI_PROXY_NETWORK_EGRESS=accepted.
+# The proxy network is the operator's: it must exist, not be this project's own, hold no container of
+# this project except ai-relay (anything else there could be reached around the gateway), and have no
+# outbound route unless NIBOMO_AI_PROXY_NETWORK_EGRESS=accepted.
 # Read-only; it never creates, connects or changes anything.
 nb_check_ai_proxy_network() {
   local name="$NB_AI_PROXY_NETWORK" info owner internal containers c
@@ -390,10 +418,14 @@ nb_check_ai_proxy_network() {
   # '|', not a tab: IFS whitespace would collapse an empty (unlabelled) first field.
   IFS='|' read -r owner internal containers <<<"$info"
   [[ "$owner" != "$NB_PROJECT" ]] || nb_die "NIBOMO_AI_PROXY_NETWORK ${name} is one of project ${NB_PROJECT}'s own networks"
+  local service
   for c in $containers; do
-    case "$c" in
-      "${NB_PROJECT}-postgres-"* | "${NB_PROJECT}-objectstore-"* | "${NB_PROJECT}-objectstore-init-"* | "${NB_PROJECT}-migrate-"*)
-        nb_die "NIBOMO_AI_PROXY_NETWORK ${name} already holds ${c}; disconnect it, data services must stay off the proxy network" ;;
+    [[ "$c" == "${NB_PROJECT}-"* ]] || continue
+    service="${c#"${NB_PROJECT}"-}"
+    service="${service%-[0-9]*}"
+    case "$service" in
+      postgres | objectstore | objectstore-init | migrate | auth | backend | mcp | worker | media-maintenance | gateway | mailpit)
+        nb_die "NIBOMO_AI_PROXY_NETWORK ${name} already holds ${c}; disconnect it, only ${NB_PROJECT}-ai-relay may be on the proxy network" ;;
     esac
   done
   if [[ "$internal" != true && "${NB_AI_PROXY_EGRESS:-}" != accepted ]]; then

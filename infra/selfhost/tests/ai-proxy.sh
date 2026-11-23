@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Synthetic test of the optional OpenAI-compatible proxy (compose.ai-proxy.yml): `setup.sh --check` and
 # compose.sh refusals against fake-docker.py, then `docker compose config` (renders only; no daemon call
-# that creates, starts or changes anything) to prove which services join the proxy network. Uses only
+# that creates, starts or changes anything) to prove that only ai-relay joins the proxy network. Uses only
 # synthetic values; never starts a container or reaches a network.
 #
 #   bash infra/selfhost/tests/ai-proxy.sh <absolute empty scratch directory>
@@ -64,6 +64,11 @@ configure "${PROXY[@]}" NIBOMO_AI_PROXY_NETWORK_EGRESS=yes; check refuse "unknow
 configure "${PROXY[@]}" NIBOMO_AI_PERSONAL_KEYS=sealed; check refuse "proxy with personal keys" "personal keys would be sent"
 configure "${PROXY[@]}" NIBOMO_AI_PROVIDER=user-key; check refuse "proxy with user-key funding" "needs NIBOMO_AI_PROVIDER=openai"
 configure "${PROXY[@]}" NIBOMO_AI_PROVIDER=none; check refuse "proxy with AI off" "needs NIBOMO_AI_PROVIDER=openai"
+configure "${PROXY[@]}" NIBOMO_AI_PROXY_BASE_URL=https://cliproxyapi/v1; check ok "https proxy, default port"
+configure "${PROXY[@]}" NIBOMO_AI_PROXY_BASE_URL=http://proxy.example.test:8317/v1; check refuse "dotted proxy host" "one DNS label"
+configure "${PROXY[@]}" NIBOMO_AI_PROXY_BASE_URL=http://10.1.2.3:8317/v1; check refuse "IP proxy host" "one DNS label"
+configure "${PROXY[@]}" NIBOMO_AI_PROXY_BASE_URL=http://backend:8080/v1; check refuse "proxy host = project service" "reserved by this stack"
+configure "${PROXY[@]}" NIBOMO_AI_PROXY_BASE_URL=http://cliproxyapi:99999/v1; check refuse "port out of range" "port must be 1-65535"
 
 # --- compose.sh against fake-docker.py ------------------------------------------------------------
 T="$WORK/f"; mkdir -m 0700 "$T" "$T/bin"
@@ -105,27 +110,40 @@ python3 -I -c 'import json,sys; json.dump({"containers":[],"volumes":{},"network
 wrap refuse "missing proxy network" "does not exist"
 fake_net false "" cliproxyapi;                    wrap refuse "routed network without acceptance" "has an outbound route"
 fake_net true nbproxy cliproxyapi;                wrap refuse "network labelled as this project" "own networks"
-fake_net true "" cliproxyapi nbproxy-postgres-1;  wrap refuse "network already holding project postgres" "data services must stay off"
-fake_net true "" cliproxyapi nbproxy-objectstore-1; wrap refuse "network already holding project objectstore" "data services must stay off"
+fake_net true "" cliproxyapi nbproxy-postgres-1;  wrap refuse "network already holding project postgres" "only nbproxy-ai-relay may be"
+fake_net true "" cliproxyapi nbproxy-backend-1;   wrap refuse "network already holding project backend" "only nbproxy-ai-relay may be"
+fake_net true "" cliproxyapi nbproxy-worker-1;    wrap refuse "network already holding project worker" "only nbproxy-ai-relay may be"
+fake_net true "" cliproxyapi nbproxy-ai-relay-1;  wrap ok "network holding only the proxy and ai-relay"
 fake_net true "" cliproxyapi;                     wrap ok "internal proxy network"
 if jq -e 'select(.argv[0]=="compose") | .argv | index("'"${SELFHOST}/compose.ai-proxy.yml"'")' "$T/calls.log" >/dev/null \
+    && jq -e 'select(.argv[0]=="compose") | .env | index("NIBOMO_AI_RELAY_HOST") and index("NIBOMO_AI_RELAY_PORT") and index("NIBOMO_AI_RELAY_AI_NETWORK")' "$T/calls.log" >/dev/null \
     && ! jq -r '.argv[]' "$T/calls.log" | grep -qE '^(create|connect|disconnect|rm)$'; then
-  ok "wrapper adds compose.ai-proxy.yml and makes no network change"
-else bad "wrapper adds compose.ai-proxy.yml and makes no network change"; fi
+  ok "wrapper adds compose.ai-proxy.yml with the derived relay settings and makes no network change"
+else bad "wrapper adds compose.ai-proxy.yml with the derived relay settings and makes no network change"; fi
 fake_env NIBOMO_AI_PROXY_NETWORK_EGRESS=accepted; fake_net false "" cliproxyapi; wrap ok "routed network with explicit acceptance"
 fake_env NIBOMO_AI_PERSONAL_KEYS=sealed;          fake_net true "" cliproxyapi; wrap refuse "wrapper refuses personal keys with proxy" "personal keys would be sent"
 
 # --- rendered Compose model (docker compose config: parse only) -----------------------------------
 if docker compose version >/dev/null 2>&1; then
   configure "${PROXY[@]}" NIBOMO_AI_MODEL=gpt-5.4 NIBOMO_COMPOSE_PROJECT=nbproxy "NIBOMO_INSTANCE_DIR=$I"
-  env -u DOCKER_HOST docker compose -p nbproxy --env-file "$I/.env" -f "${SELFHOST}/compose.yml" -f "${SELFHOST}/compose.ai.yml" \
+  # The two values compose.sh derives from NIBOMO_AI_PROXY_BASE_URL (nb_resolve_instance).
+  env -u DOCKER_HOST NIBOMO_AI_RELAY_HOST=cliproxyapi NIBOMO_AI_RELAY_PORT=8317 NIBOMO_AI_RELAY_AI_NETWORK=nbproxy_ai docker compose -p nbproxy --env-file "$I/.env" \
+    -f "${SELFHOST}/compose.yml" -f "${SELFHOST}/compose.ai.yml" \
     -f "${SELFHOST}/compose.ai-proxy.yml" --profile ai config --format json > "$WORK/config.json" 2> "$WORK/out"
   # shellcheck disable=SC2016
   if jq -e '
-      (.services.backend.networks | keys | sort) == ["ai-proxy","app","internal","storage"]
-      and (.services.worker.networks | keys | sort) == ["ai-proxy","internal","storage"]
-      and ([.services | to_entries[] | select(.key != "backend" and .key != "worker") | select(.value.networks | has("ai-proxy"))] | length) == 0
+      (.services.backend.networks | keys | sort) == ["ai","app","internal","storage"]
+      and (.services.worker.networks | keys | sort) == ["ai","internal","storage"]
+      and (.services["ai-relay"].networks | keys | sort) == ["ai","ai-proxy"]
+      and .services["ai-relay"].networks.ai.aliases == ["cliproxyapi"]
+      and .services["ai-relay"].environment == {"AI_RELAY_LISTEN_HOST":"cliproxyapi","AI_RELAY_PORT":"8317",
+        "AI_RELAY_LISTEN_NAME":"cliproxyapi.nbproxy_ai","AI_RELAY_UPSTREAM_HOST":"cliproxyapi.nibomo-ai-proxy"}
+      and (.services["ai-relay"].secrets // [] | length) == 0
+      and .services["ai-relay"].read_only == true and .services["ai-relay"].cap_drop == ["ALL"]
+      and ([.services | to_entries[] | select(.key != "ai-relay") | select(.value.networks | has("ai-proxy"))] | length) == 0
+      and ([.services | to_entries[] | select(.value.networks | has("ai")) | .key] | sort) == ["ai-relay","backend","worker"]
       and ([.services | to_entries[] | select(.key == "backend" or .key == "worker") | select(.value.networks | has("egress"))] | length) == 0
+      and .networks.ai.internal == true
       and .networks["ai-proxy"].external == true and .networks["ai-proxy"].name == "nibomo-ai-proxy"
       and .services.backend.environment.OPENAI_BASE_URL == "http://cliproxyapi:8317/v1"
       and .services.worker.environment.OPENAI_BASE_URL == "http://cliproxyapi:8317/v1"
@@ -133,8 +151,8 @@ if docker compose version >/dev/null 2>&1; then
       and .services.worker.environment.OPENAI_API_KEY_FILE == "/run/secrets/openai_api_key"
       and (.services.worker.environment | has("OPENAI_API_KEY") | not)' "$WORK/config.json" >/dev/null \
       && ! grep -q -- "$SYNTHETIC_KEY" "$WORK/config.json"; then
-    ok "config: only backend/worker join ai-proxy, both lose egress, key stays a file"
-  else bad "config: only backend/worker join ai-proxy, both lose egress, key stays a file"; fi
+    ok "config: only ai-relay joins ai-proxy; backend/worker reach it on internal ai, lose egress, key stays a file"
+  else bad "config: only ai-relay joins ai-proxy; backend/worker reach it on internal ai, lose egress, key stays a file"; fi
   # Without the proxy overlay the default AWS-style OpenAI route is unchanged: egress, no base URL.
   configure NIBOMO_COMPOSE_PROJECT=nbproxy "NIBOMO_INSTANCE_DIR=$I"
   env -u DOCKER_HOST docker compose -p nbproxy --env-file "$I/.env" -f "${SELFHOST}/compose.yml" -f "${SELFHOST}/compose.ai.yml" \

@@ -759,7 +759,8 @@ export async function generateFollowUpChatComposerSuggestionsWithDependencies(
     occurredAt: new Date(),
     surface: "composer_suggestion",
     provider: "openai",
-    modelId: CHAT_COMPOSER_SUGGESTIONS_MODEL_ID,
+    // The id sent on the wire (ai.usage_events.model_id), so an override never borrows a built-in price.
+    modelId: resolveOpenAIRequestModel(CHAT_COMPOSER_SUGGESTIONS_MODEL_ID),
     requestId: usageAttribution.requestId,
     tierAtCall: usageAttribution.tierAtCall,
     counters: toOpenAIResponsesUsageCounters(response.usage),

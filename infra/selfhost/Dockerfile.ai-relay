@@ -1,0 +1,9 @@
+# The fixed-upstream relay to the operator's OpenAI-compatible proxy (compose.ai-proxy.yml, ai-relay.mjs).
+# Baked in with a fixed mode instead of bind-mounted, so the non-root node user can read it whatever umask
+# the checkout was made under. Same Node base as the backend image; no application code or secrets.
+FROM node:24.22.3-alpine
+# COPY --chmod also sets the mode of a parent directory it creates, so create /selfhost first.
+RUN install -d -m 0755 /selfhost
+COPY --chmod=0444 ai-relay.mjs /selfhost/ai-relay.mjs
+USER node
+CMD ["node", "/selfhost/ai-relay.mjs"]

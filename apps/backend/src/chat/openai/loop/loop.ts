@@ -68,6 +68,7 @@ import {
   type ModelCallResult,
   type OpenAILoopEventSink,
 } from "./responseStream";
+import { resolveOpenAIRequestModel } from "../providerEndpoint";
 
 export {
   buildPromptCacheKey,
@@ -163,7 +164,8 @@ async function recordModelCallUsage(
     occurredAt: new Date(),
     surface: "chat",
     provider: "openai",
-    modelId: params.modelId,
+    // The id sent on the wire (ai.usage_events.model_id), so an override never borrows a built-in price.
+    modelId: resolveOpenAIRequestModel(params.modelId),
     requestId: params.requestId,
     tierAtCall: params.tierAtCall,
     counters: toOpenAIResponsesUsageCounters(modelCall.finalResponse.usage),
